@@ -67,10 +67,13 @@ export {
 export { DEFAULT_MAX_EVENTS, Simulation, type TimerHandle } from "./sim";
 export {
   DEFAULT_AGING_TIME_US,
+  DEFAULT_VLAN_ID,
   Hub,
   type MacTableEntry,
   Switch,
   type SwitchOptions,
+  type VlanPortConfig,
+  type VlanPortMode,
 } from "./switch";
 export {
   type DropReason,
