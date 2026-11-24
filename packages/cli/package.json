@@ -4,7 +4,15 @@
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
+  "bin": {
+    "netlab": "./src/main.ts"
+  },
   "scripts": {
     "test": "bun test"
+  },
+  "dependencies": {
+    "@netlab/bytes": "workspace:*",
+    "@netlab/core": "workspace:*",
+    "@netlab/protocols": "workspace:*"
   }
 }

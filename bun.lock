@@ -17,6 +17,14 @@
     "packages/cli": {
       "name": "@netlab/cli",
       "version": "0.0.0",
+      "bin": {
+        "netlab": "./src/main.ts",
+      },
+      "dependencies": {
+        "@netlab/bytes": "workspace:*",
+        "@netlab/core": "workspace:*",
+        "@netlab/protocols": "workspace:*",
+      },
     },
     "packages/core": {
       "name": "@netlab/core",
