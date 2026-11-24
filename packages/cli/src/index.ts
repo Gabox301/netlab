@@ -27,6 +27,8 @@ export {
   SCENARIO_VERSION,
   type Scenario,
   type ScenarioAction,
+  type ScenarioHostOpts,
+  type ScenarioInterfaceDef,
   type ScenarioLink,
   type ScenarioNode,
   type ScenarioPingAction,

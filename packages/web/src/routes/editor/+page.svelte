@@ -1,0 +1,2121 @@
+<script lang="ts">
+import type { ScenarioPingAction } from "../../lib/topology";
+import {
+  addInterface,
+  addLink,
+  addNode,
+  addRoute,
+  CANVAS_HEIGHT,
+  CANVAS_WIDTH,
+  canConnect,
+  DEVICE_GLYPH,
+  DEVICE_KINDS,
+  type DeviceKind,
+  describeAction,
+  exampleTopology,
+  interfaceAnchor,
+  interfaceLink,
+  kindLabel,
+  NODE_HEIGHT,
+  NODE_WIDTH,
+  removeInterface,
+  removeLink,
+  removeNode,
+  removeRoute,
+  renameInterface,
+  renameNode,
+  type Topology,
+  type TopologyEndpoint,
+  type TopologyInterface,
+  type TopologyLink,
+  type TopologyNode,
+  type TopologyRoute,
+  topologyFromJson,
+  topologyToScenarioJson,
+} from "../../lib/topology";
+
+type Selection =
+  | { kind: "node"; name: string }
+  | { kind: "link"; id: string }
+  | null;
+
+type Tool = "select" | "cable";
+
+type NoticeKind = "ok" | "error" | "info";
+
+interface Notice {
+  kind: NoticeKind;
+  text: string;
+}
+
+interface PaletteDrag {
+  kind: DeviceKind;
+  x: number;
+  y: number;
+  startX: number;
+  startY: number;
+  moved: boolean;
+  pointerId: number;
+}
+
+interface NodeDrag {
+  name: string;
+  dx: number;
+  dy: number;
+  pointerId: number;
+}
+
+const MIN_X = 8;
+const MIN_Y = 8;
+const MAX_X = CANVAS_WIDTH - NODE_WIDTH - MIN_X;
+const MAX_Y = CANVAS_HEIGHT - NODE_HEIGHT - MIN_Y;
+
+let topology = $state<Topology>(exampleTopology());
+let selection = $state<Selection>(null);
+let tool = $state<Tool>("select");
+let pending = $state<TopologyEndpoint | null>(null);
+let cableCursor = $state<{ x: number; y: number } | null>(null);
+let paletteDrag = $state<PaletteDrag | null>(null);
+let nodeDrag = $state<NodeDrag | null>(null);
+let notice = $state<Notice>({
+  kind: "info",
+  text: "Ejemplo cargado: h1 → r1 → h2/h3 con ping. Exportá el JSON y corré netlab run.",
+});
+let filename = $state("mi-topologia");
+let pingDraft = $state({
+  host: "h1",
+  destIp: "10.0.1.2",
+  count: "2",
+  size: "32",
+  interval: "1ms",
+});
+
+let svgEl: SVGSVGElement | null = null;
+let fileInput: HTMLInputElement | null = null;
+
+const selectedNode = $derived(selectedNodeOf());
+const selectedLink = $derived(selectedLinkOf());
+const hostNodes = $derived(
+  topology.nodes.filter((node) => node.kind === "host"),
+);
+const linkRows = $derived.by(() => {
+  const rows: Array<{
+    link: TopologyLink;
+    ax: number;
+    ay: number;
+    bx: number;
+    by: number;
+  }> = [];
+  for (const link of topology.links) {
+    const a = anchorFor(link.a);
+    const b = anchorFor(link.b);
+    if (a !== null && b !== null) {
+      rows.push({ link, ax: a.x, ay: a.y, bx: b.x, by: b.y });
+    }
+  }
+  return rows;
+});
+const pendingAnchor = $derived(pending === null ? null : anchorFor(pending));
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+function setNotice(kind: NoticeKind, text: string): void {
+  notice = { kind, text };
+}
+
+function endpointLabel(endpoint: TopologyEndpoint): string {
+  return `${endpoint.node}:${endpoint.iface}`;
+}
+
+function anchorFor(
+  endpoint: TopologyEndpoint,
+): { x: number; y: number } | null {
+  const node = topology.nodes.find(
+    (candidate) => candidate.name === endpoint.node,
+  );
+  if (node === undefined) {
+    return null;
+  }
+  return interfaceAnchor(node, endpoint.iface);
+}
+
+function selectedNodeOf(): TopologyNode | null {
+  const current = selection;
+  if (current === null || current.kind !== "node") {
+    return null;
+  }
+  return topology.nodes.find((node) => node.name === current.name) ?? null;
+}
+
+function selectedLinkOf(): TopologyLink | null {
+  const current = selection;
+  if (current === null || current.kind !== "link") {
+    return null;
+  }
+  return topology.links.find((link) => link.id === current.id) ?? null;
+}
+
+function nodeSubtitle(node: TopologyNode): string {
+  if (node.kind === "host") {
+    const iface = node.interfaces[0];
+    if (iface === undefined || iface.ip === "") {
+      return "sin IP";
+    }
+    return iface.prefixLength === ""
+      ? iface.ip
+      : `${iface.ip}/${iface.prefixLength}`;
+  }
+  return kindLabel(node.kind);
+}
+
+function toSvgPoint(
+  clientX: number,
+  clientY: number,
+): { x: number; y: number } | null {
+  if (svgEl === null) {
+    return null;
+  }
+  const matrix = svgEl.getScreenCTM();
+  if (matrix === null) {
+    return null;
+  }
+  const point = new DOMPoint(clientX, clientY).matrixTransform(
+    matrix.inverse(),
+  );
+  return { x: point.x, y: point.y };
+}
+
+function freeSpot(): { x: number; y: number } {
+  for (let index = 0; index < 30; index += 1) {
+    const x = 120 + (index % 4) * 230;
+    const y = 120 + Math.floor(index / 4) * 150;
+    const taken = topology.nodes.some(
+      (node) => Math.abs(node.x - x) < 100 && Math.abs(node.y - y) < 80,
+    );
+    if (!taken) {
+      return { x, y };
+    }
+  }
+  return {
+    x: 120 + ((topology.nodes.length * 32) % 600),
+    y: 120 + ((topology.nodes.length * 24) % 400),
+  };
+}
+
+function loadTopology(next: Topology, text: string): void {
+  topology = next;
+  selection = null;
+  pending = null;
+  cableCursor = null;
+  tool = "select";
+  const firstHost = next.nodes.find((node) => node.kind === "host");
+  pingDraft.host = firstHost?.name ?? "";
+  setNotice("ok", text);
+}
+
+function loadExample(): void {
+  loadTopology(
+    exampleTopology(),
+    "Ejemplo cargado: h1 → r1 → h2/h3 con ping h1 → h3. Exportá y corré netlab run.",
+  );
+}
+
+function placeNode(kind: DeviceKind, x: number, y: number): void {
+  const placed = addNode(
+    topology,
+    kind,
+    clamp(x, MIN_X, MAX_X),
+    clamp(y, MIN_Y, MAX_Y),
+  );
+  topology = placed.topology;
+  selection = { kind: "node", name: placed.name };
+  setNotice("ok", `${kindLabel(kind)} ${placed.name} agregado al lienzo.`);
+}
+
+function onPalettePointerDown(event: PointerEvent, kind: DeviceKind): void {
+  if (event.button !== 0) {
+    return;
+  }
+  event.preventDefault();
+  paletteDrag = {
+    kind,
+    x: event.clientX,
+    y: event.clientY,
+    startX: event.clientX,
+    startY: event.clientY,
+    moved: false,
+    pointerId: event.pointerId,
+  };
+}
+
+function onPaletteClick(event: MouseEvent, kind: DeviceKind): void {
+  if (event.detail !== 0) {
+    return;
+  }
+  const spot = freeSpot();
+  placeNode(kind, spot.x, spot.y);
+}
+
+function onWindowPointerMove(event: PointerEvent): void {
+  if (paletteDrag !== null) {
+    if (event.pointerId !== paletteDrag.pointerId) {
+      return;
+    }
+    paletteDrag.x = event.clientX;
+    paletteDrag.y = event.clientY;
+    if (
+      Math.hypot(
+        event.clientX - paletteDrag.startX,
+        event.clientY - paletteDrag.startY,
+      ) > 4
+    ) {
+      paletteDrag.moved = true;
+    }
+    return;
+  }
+  const drag = nodeDrag;
+  if (drag === null || event.pointerId !== drag.pointerId) {
+    return;
+  }
+  const point = toSvgPoint(event.clientX, event.clientY);
+  if (point === null) {
+    return;
+  }
+  const node = topology.nodes.find((candidate) => candidate.name === drag.name);
+  if (node === undefined) {
+    return;
+  }
+  node.x = Math.round(clamp(point.x - drag.dx, MIN_X, MAX_X));
+  node.y = Math.round(clamp(point.y - drag.dy, MIN_Y, MAX_Y));
+}
+
+function onWindowPointerUp(event: PointerEvent): void {
+  if (paletteDrag !== null && event.pointerId === paletteDrag.pointerId) {
+    const drag = paletteDrag;
+    paletteDrag = null;
+    const overCanvas =
+      svgEl !== null &&
+      event.target instanceof Node &&
+      svgEl.contains(event.target);
+    const point = toSvgPoint(event.clientX, event.clientY);
+    if (overCanvas && point !== null) {
+      placeNode(drag.kind, point.x - NODE_WIDTH / 2, point.y - NODE_HEIGHT / 2);
+      return;
+    }
+    if (!drag.moved) {
+      const spot = freeSpot();
+      placeNode(drag.kind, spot.x, spot.y);
+    }
+    return;
+  }
+  if (nodeDrag !== null && event.pointerId === nodeDrag.pointerId) {
+    nodeDrag = null;
+  }
+}
+
+function onCanvasPointerMove(event: PointerEvent): void {
+  if (pending === null) {
+    return;
+  }
+  const point = toSvgPoint(event.clientX, event.clientY);
+  if (point !== null) {
+    cableCursor = point;
+  }
+}
+
+function onCanvasPointerDown(): void {
+  pending = null;
+  cableCursor = null;
+  selection = null;
+}
+
+function onNodePointerDown(event: PointerEvent, node: TopologyNode): void {
+  event.stopPropagation();
+  if (event.button !== 0) {
+    return;
+  }
+  selection = { kind: "node", name: node.name };
+  if (tool === "cable") {
+    return;
+  }
+  const point = toSvgPoint(event.clientX, event.clientY);
+  if (point === null) {
+    return;
+  }
+  event.preventDefault();
+  nodeDrag = {
+    name: node.name,
+    dx: point.x - node.x,
+    dy: point.y - node.y,
+    pointerId: event.pointerId,
+  };
+}
+
+function onNodeKeyDown(event: KeyboardEvent, node: TopologyNode): void {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    selection = { kind: "node", name: node.name };
+    return;
+  }
+  const step = event.shiftKey ? 32 : 8;
+  const moves: Record<string, [number, number]> = {
+    ArrowLeft: [-step, 0],
+    ArrowRight: [step, 0],
+    ArrowUp: [0, -step],
+    ArrowDown: [0, step],
+  };
+  const delta = moves[event.key];
+  if (delta === undefined) {
+    return;
+  }
+  event.preventDefault();
+  const current = topology.nodes.find(
+    (candidate) => candidate.name === node.name,
+  );
+  if (current === undefined) {
+    return;
+  }
+  current.x = clamp(current.x + delta[0], MIN_X, MAX_X);
+  current.y = clamp(current.y + delta[1], MIN_Y, MAX_Y);
+  selection = { kind: "node", name: node.name };
+}
+
+function onPortPointerDown(
+  event: PointerEvent,
+  node: TopologyNode,
+  ifaceName: string,
+): void {
+  event.preventDefault();
+  event.stopPropagation();
+  if (tool !== "cable") {
+    selection = { kind: "node", name: node.name };
+    return;
+  }
+  const point = toSvgPoint(event.clientX, event.clientY);
+  if (point !== null) {
+    cableCursor = point;
+  }
+  activatePort(node, ifaceName);
+}
+
+function onPortKeyDown(
+  event: KeyboardEvent,
+  node: TopologyNode,
+  ifaceName: string,
+): void {
+  if (event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+  event.preventDefault();
+  if (tool !== "cable") {
+    selection = { kind: "node", name: node.name };
+    return;
+  }
+  cableCursor = interfaceAnchor(node, ifaceName);
+  activatePort(node, ifaceName);
+}
+
+function activatePort(node: TopologyNode, ifaceName: string): void {
+  const endpoint: TopologyEndpoint = { node: node.name, iface: ifaceName };
+  if (pending === null) {
+    pending = endpoint;
+    setNotice(
+      "info",
+      `Cable desde ${endpointLabel(endpoint)}: elegí la otra punta (Esc cancela).`,
+    );
+    return;
+  }
+  if (pending.node === endpoint.node && pending.iface === endpoint.iface) {
+    pending = null;
+    cableCursor = null;
+    setNotice("info", "Cable cancelado.");
+    return;
+  }
+  const check = canConnect(topology, pending, endpoint);
+  if (!check.ok) {
+    setNotice("error", check.reason);
+    return;
+  }
+  try {
+    const from = pending;
+    const linked = addLink(topology, from, endpoint);
+    topology = linked.topology;
+    pending = null;
+    cableCursor = null;
+    selection = { kind: "link", id: linked.id };
+    setNotice(
+      "ok",
+      `Cable ${linked.id}: ${endpointLabel(from)} ↔ ${endpointLabel(endpoint)}.`,
+    );
+    return;
+  } catch (error) {
+    setNotice("error", messageOf(error));
+  }
+}
+
+function onSelectLink(event: PointerEvent, id: string): void {
+  event.preventDefault();
+  event.stopPropagation();
+  pending = null;
+  cableCursor = null;
+  selection = { kind: "link", id };
+}
+
+function onLinkKeyDown(event: KeyboardEvent, id: string): void {
+  if (event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+  event.preventDefault();
+  pending = null;
+  cableCursor = null;
+  selection = { kind: "link", id };
+}
+
+function toggleCable(): void {
+  tool = tool === "cable" ? "select" : "cable";
+  pending = null;
+  cableCursor = null;
+  setNotice(
+    "info",
+    tool === "cable"
+      ? "Modo cable: tocá dos interfaces para unirlas."
+      : "Modo selección: arrastrá nodos para moverlos.",
+  );
+}
+
+function setSelectTool(): void {
+  tool = "select";
+  pending = null;
+  cableCursor = null;
+}
+
+function onWindowKeyDown(event: KeyboardEvent): void {
+  if (event.key !== "Escape") {
+    return;
+  }
+  if (pending !== null) {
+    pending = null;
+    cableCursor = null;
+    setNotice("info", "Cable cancelado.");
+    return;
+  }
+  if (paletteDrag !== null) {
+    paletteDrag = null;
+    return;
+  }
+  if (nodeDrag !== null) {
+    nodeDrag = null;
+    return;
+  }
+  if (tool === "cable") {
+    tool = "select";
+    setNotice("info", "Modo cable desactivado.");
+  }
+}
+
+function onRenameNode(node: TopologyNode, event: Event): void {
+  const input = event.currentTarget as HTMLInputElement;
+  try {
+    topology = renameNode(topology, node.name, input.value);
+    selection = { kind: "node", name: input.value.trim() };
+    setNotice("ok", `Dispositivo renombrado a ${input.value.trim()}.`);
+  } catch (error) {
+    input.value = node.name;
+    setNotice("error", messageOf(error));
+  }
+}
+
+function onRenameInterface(
+  node: TopologyNode,
+  iface: TopologyInterface,
+  event: Event,
+): void {
+  const input = event.currentTarget as HTMLInputElement;
+  try {
+    topology = renameInterface(topology, node.name, iface.name, input.value);
+    setNotice("ok", `${node.name}: interfaz ${input.value.trim()} lista.`);
+  } catch (error) {
+    input.value = iface.name;
+    setNotice("error", messageOf(error));
+  }
+}
+
+function onIfaceField(
+  iface: TopologyInterface,
+  field: "mac" | "ip" | "mask" | "prefixLength" | "gateway" | "mtu",
+  event: Event,
+): void {
+  const input = event.currentTarget as HTMLInputElement;
+  iface[field] = input.value;
+}
+
+function onVlanModeChange(iface: TopologyInterface, event: Event): void {
+  const select = event.currentTarget as HTMLSelectElement;
+  const mode = select.value;
+  if (mode === "default") {
+    iface.vlan = null;
+    return;
+  }
+  if (mode !== "access" && mode !== "trunk") {
+    return;
+  }
+  if (iface.vlan === null) {
+    iface.vlan = { mode, vlan: "1", allowed: "", native: "" };
+    return;
+  }
+  iface.vlan.mode = mode;
+}
+
+function onVlanField(
+  iface: TopologyInterface,
+  field: "vlan" | "allowed" | "native",
+  event: Event,
+): void {
+  const input = event.currentTarget as HTMLInputElement;
+  const vlan = iface.vlan;
+  if (vlan === null) {
+    return;
+  }
+  vlan[field] = input.value;
+}
+
+function onAddInterface(node: TopologyNode): void {
+  try {
+    const added = addInterface(topology, node.name);
+    topology = added.topology;
+    setNotice("ok", `${node.name}: interfaz ${added.name} agregada.`);
+  } catch (error) {
+    setNotice("error", messageOf(error));
+  }
+}
+
+function onRemoveInterface(node: TopologyNode, iface: TopologyInterface): void {
+  const attached = topology.links.filter(
+    (link) =>
+      (link.a.node === node.name && link.a.iface === iface.name) ||
+      (link.b.node === node.name && link.b.iface === iface.name),
+  ).length;
+  topology = removeInterface(topology, node.name, iface.name);
+  setNotice(
+    "ok",
+    `${node.name}: interfaz ${iface.name} eliminada${attached > 0 ? ` (${attached} cable(s) también)` : ""}.`,
+  );
+}
+
+function onAddRoute(node: TopologyNode, destination = "10.0.0.0/24"): void {
+  topology = addRoute(topology, node.name, destination);
+  setNotice("ok", `${node.name}: ruta ${destination} agregada.`);
+}
+
+function onRemoveRoute(node: TopologyNode, index: number): void {
+  topology = removeRoute(topology, node.name, index);
+  setNotice("ok", `${node.name}: ruta eliminada.`);
+}
+
+function onRouteField(
+  route: TopologyRoute,
+  field: "destination" | "gateway" | "metric",
+  event: Event,
+): void {
+  const input = event.currentTarget as HTMLInputElement;
+  route[field] = input.value;
+}
+
+function onRouteIfaceChange(route: TopologyRoute, event: Event): void {
+  const select = event.currentTarget as HTMLSelectElement;
+  route.iface = select.value;
+}
+
+function onRemoveNode(node: TopologyNode): void {
+  topology = removeNode(topology, node.name);
+  selection = null;
+  setNotice("ok", `${node.name} eliminado del lienzo.`);
+}
+
+function onRemoveSelectedLink(link: TopologyLink): void {
+  topology = removeLink(topology, link.id);
+  selection = null;
+  setNotice("ok", `Cable ${link.id} eliminado.`);
+}
+
+function onLatencyChange(link: TopologyLink, event: Event): void {
+  const input = event.currentTarget as HTMLInputElement;
+  const value = Number(input.value);
+  if (!Number.isInteger(value) || value < 0) {
+    input.value = String(link.params.latencyUs);
+    setNotice("error", "La latencia debe ser un entero ≥ 0 (µs).");
+    return;
+  }
+  link.params.latencyUs = value;
+}
+
+function onSeedChange(event: Event): void {
+  const input = event.currentTarget as HTMLInputElement;
+  const value = Number.parseInt(input.value, 10);
+  if (!Number.isInteger(value) || value < 0) {
+    input.value = String(topology.seed);
+    setNotice("error", "seed debe ser un entero ≥ 0.");
+    return;
+  }
+  topology.seed = value;
+}
+
+function onUntilInput(event: Event): void {
+  const input = event.currentTarget as HTMLInputElement;
+  topology.until = input.value;
+}
+
+function onFilenameInput(event: Event): void {
+  const input = event.currentTarget as HTMLInputElement;
+  filename = input.value;
+}
+
+function onRemoveAction(index: number): void {
+  topology.actions = topology.actions.filter(
+    (_, actionIndex) => actionIndex !== index,
+  );
+  setNotice("ok", "Acción eliminada.");
+}
+
+function addPing(): void {
+  if (!hostNodes.some((node) => node.name === pingDraft.host)) {
+    setNotice("error", "Elegí un host para el ping.");
+    return;
+  }
+  const destIp = pingDraft.destIp.trim();
+  if (destIp === "") {
+    setNotice("error", "El ping necesita una IP destino.");
+    return;
+  }
+  const count = Number.parseInt(pingDraft.count, 10);
+  const size = Number.parseInt(pingDraft.size, 10);
+  if (!Number.isInteger(count) || count < 1) {
+    setNotice("error", "count debe ser un entero ≥ 1.");
+    return;
+  }
+  if (!Number.isInteger(size) || size < 0) {
+    setNotice("error", "size debe ser un entero ≥ 0.");
+    return;
+  }
+  const interval = pingDraft.interval.trim();
+  const action: ScenarioPingAction = {
+    at: 0,
+    host: pingDraft.host,
+    destIp,
+    ping: { count, size, ...(interval === "" ? {} : { interval }) },
+  };
+  topology.actions = [...topology.actions, action];
+  setNotice("ok", `Ping ${pingDraft.host} → ${destIp} agregado.`);
+}
+
+function openImport(): void {
+  fileInput?.click();
+}
+
+async function onImportFile(event: Event): Promise<void> {
+  const input = event.currentTarget as HTMLInputElement;
+  const file = input.files?.[0];
+  if (file === undefined) {
+    return;
+  }
+  try {
+    const text = await file.text();
+    const imported = topologyFromJson(text);
+    loadTopology(
+      imported.topology,
+      `Importado ${file.name}: ${plural(imported.topology.nodes.length, "nodo", "nodos")}, ${plural(imported.topology.links.length, "cable", "cables")}, ${plural(imported.topology.actions.length, "acción", "acciones")}.`,
+    );
+  } catch (error) {
+    setNotice("error", `Import falló: ${messageOf(error)}`);
+  } finally {
+    input.value = "";
+  }
+}
+
+function safeFilename(): string {
+  const base = filename
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return base === "" ? "netlab-topologia" : base;
+}
+
+function exportJson(): void {
+  try {
+    const { json, scenario } = topologyToScenarioJson(topology);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${safeFilename()}.json`;
+    anchor.rel = "noopener";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setNotice(
+      "ok",
+      `Exportado ${anchor.download} · v${scenario.version} · ${plural(scenario.nodes.length, "nodo", "nodos")}, ${plural(scenario.links.length, "cable", "cables")}, ${plural(scenario.actions.length, "acción", "acciones")} (validado con parseScenarioJson).`,
+    );
+  } catch (error) {
+    setNotice("error", `No se exportó: ${messageOf(error)}`);
+  }
+}
+</script>
+
+<svelte:head>
+  <title>NetLab — Editor de topología · Rojo señal</title>
+  <meta
+    name="description"
+    content="Editor NetLab: dibujá la red, conectá interfaces y exportá un scenario v1 que netlab run ejecuta sin editar."
+  />
+</svelte:head>
+
+<svelte:window
+  onpointermove={onWindowPointerMove}
+  onpointerup={onWindowPointerUp}
+  onpointercancel={onWindowPointerUp}
+  onkeydown={onWindowKeyDown}
+/>
+
+<div class="shell">
+  <header class="top">
+    <div class="logo">Net<b>Lab</b><span class="tag">editor</span></div>
+    <div class="scen mono">
+      {plural(topology.nodes.length, "nodo", "nodos")} · {plural(
+        topology.links.length,
+        "cable",
+        "cables",
+      )}
+    </div>
+    <div class="sp"></div>
+    <span class="pill">sin persistencia</span>
+    <a class="linkbtn" href="/">Workbench</a>
+    <button type="button" onclick={loadExample}>Ejemplo</button>
+    <button type="button" onclick={openImport}>Importar JSON</button>
+    <input
+      bind:this={fileInput}
+      type="file"
+      accept=".json,application/json"
+      hidden
+      onchange={(event) => void onImportFile(event)}
+    />
+    <button class="primary" type="button" onclick={exportJson}>
+      Exportar JSON
+    </button>
+  </header>
+
+  <main class="stage">
+    <svg
+      bind:this={svgEl}
+      class="canvas"
+      class:connecting={tool === "cable"}
+      viewBox={`0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}`}
+      preserveAspectRatio="xMidYMid meet"
+      role="group"
+      aria-label="Lienzo de topología: arrastrá dispositivos y conectá interfaces"
+      onpointerdown={onCanvasPointerDown}
+      onpointermove={onCanvasPointerMove}
+    >
+      <defs>
+        <pattern
+          id="netlab-grid"
+          width="48"
+          height="48"
+          patternUnits="userSpaceOnUse"
+        >
+          <path class="gridline" d="M48 0H0V48" fill="none"></path>
+        </pattern>
+      </defs>
+      <rect
+        class="bg"
+        x="0"
+        y="0"
+        width={CANVAS_WIDTH}
+        height={CANVAS_HEIGHT}
+        fill="url(#netlab-grid)"
+      ></rect>
+
+      {#each linkRows as row (row.link.id)}
+        <line
+          class="link"
+          class:sel={selection?.kind === "link" &&
+            selection.id === row.link.id}
+          x1={row.ax}
+          y1={row.ay}
+          x2={row.bx}
+          y2={row.by}
+        ></line>
+        <line
+          class="link-hit"
+          x1={row.ax}
+          y1={row.ay}
+          x2={row.bx}
+          y2={row.by}
+          role="button"
+          tabindex="0"
+          aria-label={`Cable ${row.link.id}: ${row.link.a.node}:${row.link.a.iface} a ${row.link.b.node}:${row.link.b.iface}`}
+          onpointerdown={(event) => onSelectLink(event, row.link.id)}
+          onkeydown={(event) => onLinkKeyDown(event, row.link.id)}
+        ></line>
+      {/each}
+
+      {#if pendingAnchor !== null && cableCursor !== null}
+        <line
+          class="preview"
+          x1={pendingAnchor.x}
+          y1={pendingAnchor.y}
+          x2={cableCursor.x}
+          y2={cableCursor.y}
+        ></line>
+      {/if}
+
+      {#each topology.nodes as node (node.name)}
+        <g
+          class="node-g"
+          class:sel={selection?.kind === "node" &&
+            selection.name === node.name}
+          class:dragging={nodeDrag?.name === node.name}
+          role="button"
+          tabindex="0"
+          aria-label={`Dispositivo ${node.name} (${kindLabel(node.kind)})`}
+          onpointerdown={(event) => onNodePointerDown(event, node)}
+          onkeydown={(event) => onNodeKeyDown(event, node)}
+        >
+          <rect
+            class="node"
+            x={node.x}
+            y={node.y}
+            width={NODE_WIDTH}
+            height={NODE_HEIGHT}
+            rx="12"
+          ></rect>
+          <text
+            class="nl"
+            x={node.x + NODE_WIDTH / 2}
+            y={node.y + 27}
+            text-anchor="middle">{node.name}</text
+          >
+          <text
+            class={`ns k-${node.kind}`}
+            x={node.x + NODE_WIDTH / 2}
+            y={node.y + 45}
+            text-anchor="middle">{nodeSubtitle(node)}</text
+          >
+        </g>
+      {/each}
+
+      {#each topology.nodes as node (node.name)}
+        {#each node.interfaces as iface (iface.name)}
+          {@const anchor = interfaceAnchor(node, iface.name)}
+          {#if anchor !== null}
+            <g
+              class="port-g"
+              class:armed={pending?.node === node.name &&
+                pending?.iface === iface.name}
+              class:used={interfaceLink(topology, {
+                node: node.name,
+                iface: iface.name,
+              }) !== null}
+              role="button"
+              tabindex="0"
+              aria-label={`Interfaz ${node.name}:${iface.name}`}
+              onpointerdown={(event) =>
+                onPortPointerDown(event, node, iface.name)}
+              onkeydown={(event) => onPortKeyDown(event, node, iface.name)}
+            >
+              <title>{node.name}:{iface.name} · {iface.mac}</title>
+              <circle
+                class="port"
+                cx={anchor.x}
+                cy={anchor.y}
+                r="6"
+              ></circle>
+              <circle
+                class="port-core"
+                cx={anchor.x}
+                cy={anchor.y}
+                r="2"
+              ></circle>
+              <text
+                class="plbl"
+                class:show={tool === "cable" ||
+                  (selection?.kind === "node" &&
+                    selection.name === node.name)}
+                x={anchor.x}
+                y={anchor.y + 19}
+                text-anchor="middle">{iface.name}</text
+              >
+            </g>
+          {/if}
+        {/each}
+      {/each}
+    </svg>
+
+    <nav class="palette" aria-label="Herramientas">
+      <button
+        type="button"
+        class="tool"
+        class:on={tool === "select"}
+        aria-pressed={tool === "select"}
+        title="Seleccionar y mover"
+        onclick={setSelectTool}
+      >
+        <span class="glyph" aria-hidden="true">↖</span><small>select</small>
+      </button>
+      {#each DEVICE_KINDS as kind (kind)}
+        <button
+          type="button"
+          class="tool"
+          title={`Arrastrar ${kind} al lienzo (o clic para agregarlo)`}
+          aria-label={`Agregar ${kind}`}
+          onpointerdown={(event) => onPalettePointerDown(event, kind)}
+          onclick={(event) => onPaletteClick(event, kind)}
+        >
+          <span class="glyph" aria-hidden="true">{DEVICE_GLYPH[kind]}</span>
+          <small>{kind}</small>
+        </button>
+      {/each}
+      <button
+        type="button"
+        class="tool"
+        class:on={tool === "cable"}
+        aria-pressed={tool === "cable"}
+        title="Conectar interfaces con un cable"
+        onclick={toggleCable}
+      >
+        <span class="glyph" aria-hidden="true">∿</span><small>cable</small>
+      </button>
+    </nav>
+
+    <aside class="inspector" aria-label="Propiedades">
+      {#if selectedNode}
+        {@const node = selectedNode}
+        <div class="ins-head">
+          <h2>{kindLabel(node.kind)} · {node.name}</h2>
+          <button
+            type="button"
+            class="icon"
+            aria-label="Deseleccionar"
+            onclick={() => (selection = null)}>✕</button
+          >
+        </div>
+        <div class="ins-body">
+          <label class="fld">
+            <span>nombre</span>
+            <input
+              value={node.name}
+              spellcheck="false"
+              onchange={(event) => onRenameNode(node, event)}
+            />
+          </label>
+
+          <div class="sec">
+            <h3>Interfaces · {node.interfaces.length}</h3>
+            <button
+              type="button"
+              class="mini"
+              onclick={() => onAddInterface(node)}>+ interfaz</button
+            >
+          </div>
+
+          {#each node.interfaces as iface (iface.name)}
+            <fieldset class="iface">
+              <legend>{iface.name || "(sin nombre)"}</legend>
+              <div class="grid2">
+                <label class="fld">
+                  <span>nombre</span>
+                  <input
+                    value={iface.name}
+                    spellcheck="false"
+                    onchange={(event) =>
+                      onRenameInterface(node, iface, event)}
+                  />
+                </label>
+                <label class="fld">
+                  <span>MAC</span>
+                  <input
+                    class="mono"
+                    value={iface.mac}
+                    spellcheck="false"
+                    oninput={(event) => onIfaceField(iface, "mac", event)}
+                  />
+                </label>
+              </div>
+
+              {#if node.kind === "host"}
+                <div class="grid2">
+                  <label class="fld">
+                    <span>IP</span>
+                    <input
+                      class="mono"
+                      value={iface.ip}
+                      placeholder="10.0.0.2"
+                      oninput={(event) => onIfaceField(iface, "ip", event)}
+                    />
+                  </label>
+                  <label class="fld">
+                    <span>máscara</span>
+                    <input
+                      class="mono"
+                      value={iface.mask}
+                      placeholder="255.255.255.0"
+                      oninput={(event) => onIfaceField(iface, "mask", event)}
+                    />
+                  </label>
+                  <label class="fld">
+                    <span>gateway</span>
+                    <input
+                      class="mono"
+                      value={iface.gateway}
+                      placeholder="10.0.0.1"
+                      oninput={(event) =>
+                        onIfaceField(iface, "gateway", event)}
+                    />
+                  </label>
+                  <label class="fld">
+                    <span>prefijo (opcional)</span>
+                    <input
+                      class="mono"
+                      value={iface.prefixLength}
+                      placeholder="24"
+                      oninput={(event) =>
+                        onIfaceField(iface, "prefixLength", event)}
+                    />
+                  </label>
+                </div>
+              {:else if node.kind === "router"}
+                <div class="grid2">
+                  <label class="fld">
+                    <span>IP / CIDR</span>
+                    <input
+                      class="mono"
+                      value={iface.ip}
+                      placeholder="10.0.0.1"
+                      oninput={(event) => onIfaceField(iface, "ip", event)}
+                    />
+                  </label>
+                  <label class="fld">
+                    <span>prefijo</span>
+                    <input
+                      class="mono"
+                      value={iface.prefixLength}
+                      placeholder="24"
+                      oninput={(event) =>
+                        onIfaceField(iface, "prefixLength", event)}
+                    />
+                  </label>
+                  <label class="fld">
+                    <span>MTU</span>
+                    <input
+                      class="mono"
+                      value={iface.mtu}
+                      placeholder="1500"
+                      oninput={(event) => onIfaceField(iface, "mtu", event)}
+                    />
+                  </label>
+                </div>
+              {:else if node.kind === "switch"}
+                <div class="grid2">
+                  <label class="fld">
+                    <span>VLAN</span>
+                    <select
+                      value={iface.vlan?.mode ?? "default"}
+                      onchange={(event) => onVlanModeChange(iface, event)}
+                    >
+                      <option value="default">default (access 1)</option>
+                      <option value="access">access</option>
+                      <option value="trunk">trunk</option>
+                    </select>
+                  </label>
+                  {#if iface.vlan?.mode === "access"}
+                    <label class="fld">
+                      <span>VLAN id</span>
+                      <input
+                        class="mono"
+                        value={iface.vlan.vlan}
+                        oninput={(event) =>
+                          onVlanField(iface, "vlan", event)}
+                      />
+                    </label>
+                  {/if}
+                </div>
+                {#if iface.vlan?.mode === "trunk"}
+                  <div class="grid2">
+                    <label class="fld">
+                      <span>allowed</span>
+                      <input
+                        class="mono"
+                        value={iface.vlan.allowed}
+                        placeholder="10,20"
+                        oninput={(event) =>
+                          onVlanField(iface, "allowed", event)}
+                      />
+                    </label>
+                    <label class="fld">
+                      <span>native</span>
+                      <input
+                        class="mono"
+                        value={iface.vlan.native}
+                        oninput={(event) =>
+                          onVlanField(iface, "native", event)}
+                      />
+                    </label>
+                  </div>
+                {/if}
+              {/if}
+
+              <button
+                type="button"
+                class="mini danger-ghost"
+                onclick={() => onRemoveInterface(node, iface)}
+              >
+                Quitar interfaz
+              </button>
+            </fieldset>
+          {/each}
+
+          {#if node.kind === "router"}
+            <div class="sec">
+              <h3>Rutas estáticas · {node.routes.length}</h3>
+              <span class="row">
+                <button
+                  type="button"
+                  class="mini"
+                  onclick={() => onAddRoute(node)}>+ ruta</button
+                >
+                <button
+                  type="button"
+                  class="mini"
+                  onclick={() => onAddRoute(node, "0.0.0.0/0")}
+                >
+                  + default
+                </button>
+              </span>
+            </div>
+            {#each node.routes as route, index (index)}
+              <div class="route">
+                <div class="grid2">
+                  <label class="fld">
+                    <span>destino</span>
+                    <input
+                      class="mono"
+                      value={route.destination}
+                      oninput={(event) =>
+                        onRouteField(route, "destination", event)}
+                    />
+                  </label>
+                  <label class="fld">
+                    <span>gateway</span>
+                    <input
+                      class="mono"
+                      value={route.gateway}
+                      placeholder="opcional"
+                      oninput={(event) =>
+                        onRouteField(route, "gateway", event)}
+                    />
+                  </label>
+                  <label class="fld">
+                    <span>iface</span>
+                    <select
+                      value={route.iface}
+                      onchange={(event) => onRouteIfaceChange(route, event)}
+                    >
+                      {#each node.interfaces as option (option.name)}
+                        <option value={option.name}>{option.name}</option>
+                      {/each}
+                    </select>
+                  </label>
+                  <label class="fld">
+                    <span>métrica</span>
+                    <input
+                      class="mono"
+                      value={route.metric}
+                      placeholder="0"
+                      oninput={(event) =>
+                        onRouteField(route, "metric", event)}
+                    />
+                  </label>
+                </div>
+                <button
+                  type="button"
+                  class="mini danger-ghost"
+                  onclick={() => onRemoveRoute(node, index)}
+                >
+                  Quitar ruta
+                </button>
+              </div>
+            {/each}
+          {/if}
+
+          <button
+            type="button"
+            class="danger"
+            onclick={() => onRemoveNode(node)}
+          >
+            Eliminar dispositivo
+          </button>
+        </div>
+      {:else if selectedLink}
+        {@const link = selectedLink}
+        <div class="ins-head">
+          <h2>Cable · {link.id}</h2>
+          <button
+            type="button"
+            class="icon"
+            aria-label="Deseleccionar"
+            onclick={() => (selection = null)}>✕</button
+          >
+        </div>
+        <div class="ins-body">
+          <p class="mono pair">
+            {link.a.node}:{link.a.iface} ↔ {link.b.node}:{link.b.iface}
+          </p>
+          <label class="fld">
+            <span>latencia (µs)</span>
+            <input
+              class="mono"
+              type="number"
+              min="0"
+              step="1"
+              value={link.params.latencyUs}
+              onchange={(event) => onLatencyChange(link, event)}
+            />
+          </label>
+          <p class="hint">
+            El export emite <span class="mono">params.latencyUs</span>. Otros
+            impairments de un JSON importado se conservan tal cual.
+          </p>
+          <button
+            type="button"
+            class="danger"
+            onclick={() => onRemoveSelectedLink(link)}
+          >
+            Eliminar cable
+          </button>
+        </div>
+      {:else}
+        <div class="ins-head">
+          <h2>Escenario</h2>
+        </div>
+        <div class="ins-body">
+          <p class="hint">
+            Nada seleccionado. El export llama a
+            <span class="mono">parseScenarioJson</span> antes de descargar.
+          </p>
+          <div class="grid2">
+            <label class="fld">
+              <span>seed</span>
+              <input
+                class="mono"
+                type="number"
+                min="0"
+                step="1"
+                value={topology.seed}
+                onchange={onSeedChange}
+              />
+            </label>
+            <label class="fld">
+              <span>until</span>
+              <input
+                class="mono"
+                value={topology.until}
+                placeholder="5s"
+                oninput={onUntilInput}
+              />
+            </label>
+          </div>
+          <label class="fld">
+            <span>archivo</span>
+            <input
+              class="mono"
+              value={filename}
+              placeholder="mi-topologia"
+              oninput={onFilenameInput}
+            />
+          </label>
+
+          <div class="sec">
+            <h3>Acciones · {topology.actions.length}</h3>
+          </div>
+          {#if topology.actions.length > 0}
+            <ul class="actions">
+              {#each topology.actions as action, index (index)}
+                <li>
+                  <span class="mono">{describeAction(action)}</span>
+                  <button
+                    type="button"
+                    class="mini"
+                    aria-label={`Quitar acción ${index + 1}`}
+                    onclick={() => onRemoveAction(index)}>✕</button
+                  >
+                </li>
+              {/each}
+            </ul>
+          {:else}
+            <p class="hint">
+              Lista vacía: el escenario sigue siendo v1 válido.
+            </p>
+          {/if}
+
+          {#if hostNodes.length > 0}
+            <fieldset class="iface">
+              <legend>Agregar ping</legend>
+              <div class="grid2">
+                <label class="fld">
+                  <span>host</span>
+                  <select bind:value={pingDraft.host}>
+                    {#each hostNodes as host (host.name)}
+                      <option value={host.name}>{host.name}</option>
+                    {/each}
+                  </select>
+                </label>
+                <label class="fld">
+                  <span>destino</span>
+                  <input
+                    class="mono"
+                    bind:value={pingDraft.destIp}
+                    placeholder="10.0.0.2"
+                  />
+                </label>
+              </div>
+              <div class="grid3">
+                <label class="fld">
+                  <span>count</span>
+                  <input class="mono" bind:value={pingDraft.count} />
+                </label>
+                <label class="fld">
+                  <span>size</span>
+                  <input class="mono" bind:value={pingDraft.size} />
+                </label>
+                <label class="fld">
+                  <span>interval</span>
+                  <input class="mono" bind:value={pingDraft.interval} />
+                </label>
+              </div>
+              <button type="button" class="mini" onclick={addPing}>
+                + ping
+              </button>
+            </fieldset>
+          {:else}
+            <p class="hint">
+              Agregá un host para poder crear acciones de ping.
+            </p>
+          {/if}
+
+          <button type="button" class="primary wide" onclick={exportJson}>
+            Exportar scenario v1
+          </button>
+        </div>
+      {/if}
+    </aside>
+
+    {#if paletteDrag !== null && paletteDrag.moved}
+      <div
+        class="ghost"
+        style={`left:${paletteDrag.x}px; top:${paletteDrag.y}px`}
+        aria-hidden="true"
+      >
+        <span>{DEVICE_GLYPH[paletteDrag.kind]}</span>
+        {paletteDrag.kind}
+      </div>
+    {/if}
+
+    {#if topology.nodes.length === 0}
+      <div class="empty-card">
+        <h2>Lienzo vacío</h2>
+        <p>
+          Arrastrá un dispositivo desde la barra izquierda o cargá el ejemplo
+          para ver el flujo dibujar → exportar → netlab run.
+        </p>
+        <div class="row center">
+          <button type="button" onclick={loadExample}>Cargar ejemplo</button>
+          <button type="button" onclick={openImport}>Importar JSON v1</button>
+        </div>
+      </div>
+    {/if}
+  </main>
+
+  <footer class="status" aria-live="polite">
+    <span
+      class:ok={notice.kind === "ok"}
+      class:bad={notice.kind === "error"}
+      title={notice.text}>{notice.text}</span
+    >
+    <span class="sp"></span>
+    <span>
+      {plural(topology.nodes.length, "nodo", "nodos")} · {plural(
+        topology.links.length,
+        "cable",
+        "cables",
+      )} · {plural(topology.actions.length, "acción", "acciones")}
+    </span>
+    <span>seed {topology.seed} · hasta {topology.until || "5s"}</span>
+    <span>{tool === "cable" ? "modo cable" : "modo selección"}</span>
+  </footer>
+</div>
+
+<style>
+  :global(:root) {
+    --bg: #0b0b0d;
+    --panel: #131316;
+    --panel2: #1b1b20;
+    --card: rgba(19, 19, 22, 0.96);
+    --line: #34343c;
+    --ink: #ffffff;
+    --mut: #b4b4be;
+    --dim: #80808c;
+    --acc: #ff4d3d;
+    --ok: #4dff9a;
+    --warn: #ffd23d;
+    --bad: #ff4d3d;
+    --sel: #2e1512;
+    --l2: #3dc8ff;
+    --l3: #ff4d3d;
+    --l4: #ffd23d;
+    --disp: Impact, "Arial Narrow", "Arial Narrow Bold", sans-serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+      Arial, sans-serif;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+
+  :global(*) {
+    box-sizing: border-box;
+  }
+
+  :global(html),
+  :global(body) {
+    height: 100%;
+    margin: 0;
+  }
+
+  :global(body) {
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px var(--sans);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :global(button) {
+    font: inherit;
+    color: var(--ink);
+    background: var(--panel2);
+    border: 1px solid var(--line);
+    border-radius: 0;
+    padding: 7px 13px;
+    cursor: pointer;
+  }
+
+  :global(button:hover:not(:disabled)) {
+    border-color: var(--acc);
+  }
+
+  :global(:focus-visible) {
+    outline: 2px solid var(--acc);
+    outline-offset: 2px;
+  }
+
+  .shell {
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    min-height: 52px;
+    padding: 6px 16px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+
+  .logo {
+    font: 700 19px var(--disp);
+    letter-spacing: 0.4px;
+    white-space: nowrap;
+  }
+
+  .logo b {
+    color: var(--acc);
+  }
+
+  .tag {
+    margin-left: 8px;
+    font: 11px var(--mono);
+    color: var(--mut);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    border: 1px solid var(--line);
+    padding: 1px 6px;
+    vertical-align: middle;
+  }
+
+  .scen {
+    color: var(--mut);
+    font-size: 12.5px;
+    white-space: nowrap;
+  }
+
+  .sp {
+    flex: 1;
+  }
+
+  .pill {
+    font: 12px var(--mono);
+    border: 1px solid var(--line);
+    border-radius: 99px;
+    padding: 5px 12px;
+    color: var(--mut);
+    white-space: nowrap;
+  }
+
+  .linkbtn {
+    color: var(--ink);
+    text-decoration: none;
+    border: 1px solid var(--line);
+    background: var(--panel2);
+    padding: 7px 13px;
+    white-space: nowrap;
+  }
+
+  .linkbtn:hover {
+    border-color: var(--acc);
+  }
+
+  .primary {
+    background: var(--acc);
+    border-color: var(--acc);
+    color: #ffffff;
+    font-weight: 600;
+  }
+
+  .wide {
+    width: 100%;
+  }
+
+  .mono {
+    font-family: var(--mono);
+  }
+
+  .stage {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg);
+  }
+
+  .canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    touch-action: none;
+  }
+
+  .canvas.connecting {
+    cursor: crosshair;
+  }
+
+  .gridline {
+    stroke: #1b1b20;
+    stroke-width: 1;
+  }
+
+  .link {
+    stroke: var(--dim);
+    stroke-width: 2.5;
+    pointer-events: none;
+  }
+
+  .link.sel {
+    stroke: var(--ok);
+    stroke-width: 3.5;
+  }
+
+  .link-hit {
+    stroke: transparent;
+    stroke-width: 16;
+    cursor: pointer;
+  }
+
+  .preview {
+    stroke: var(--acc);
+    stroke-width: 2;
+    stroke-dasharray: 6 5;
+    pointer-events: none;
+  }
+
+  .node {
+    fill: var(--panel2);
+    stroke: var(--line);
+    stroke-width: 1.5;
+  }
+
+  .node-g {
+    cursor: grab;
+  }
+
+  .node-g:hover .node,
+  .node-g.sel .node {
+    stroke: var(--acc);
+  }
+
+  .node-g.sel .node {
+    stroke-width: 2.5;
+  }
+
+  .node-g.dragging {
+    cursor: grabbing;
+  }
+
+  .nl {
+    fill: var(--ink);
+    font: 600 13px var(--sans);
+    pointer-events: none;
+  }
+
+  .ns {
+    font: 11px var(--mono);
+    pointer-events: none;
+  }
+
+  .k-host {
+    fill: var(--mut);
+  }
+
+  .k-switch {
+    fill: var(--l2);
+  }
+
+  .k-router {
+    fill: var(--acc);
+  }
+
+  .k-hub {
+    fill: var(--warn);
+  }
+
+  .port-g {
+    cursor: pointer;
+  }
+
+  .port {
+    fill: var(--panel2);
+    stroke: var(--dim);
+    stroke-width: 1.5;
+    transition:
+      stroke 0.15s,
+      fill 0.15s;
+  }
+
+  .port-core {
+    fill: var(--dim);
+    pointer-events: none;
+  }
+
+  .port-g:hover .port {
+    stroke: var(--acc);
+    fill: var(--sel);
+  }
+
+  .port-g.used .port {
+    stroke: var(--ok);
+  }
+
+  .port-g.used .port-core {
+    fill: var(--ok);
+  }
+
+  .port-g.armed .port {
+    stroke: var(--acc);
+    fill: var(--acc);
+  }
+
+  .port-g.armed .port-core {
+    fill: var(--bg);
+  }
+
+  .plbl {
+    fill: var(--mut);
+    font: 9px var(--mono);
+    opacity: 0;
+    transition: opacity 0.15s;
+    pointer-events: none;
+  }
+
+  .plbl.show {
+    opacity: 1;
+  }
+
+  .palette {
+    position: absolute;
+    left: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    z-index: 4;
+  }
+
+  .tool {
+    width: 52px;
+    height: 48px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 4px;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .tool .glyph {
+    font-size: 18px;
+    line-height: 1;
+  }
+
+  .tool small {
+    font: 9px var(--mono);
+    color: var(--mut);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .tool.on {
+    border-color: var(--acc);
+    background: var(--sel);
+  }
+
+  .tool.on small {
+    color: var(--acc);
+  }
+
+  .inspector {
+    position: absolute;
+    right: 16px;
+    top: 16px;
+    max-height: calc(100% - 32px);
+    width: 360px;
+    display: flex;
+    flex-direction: column;
+    background: var(--card);
+    border: 1px solid var(--line);
+    z-index: 4;
+    overflow: hidden;
+  }
+
+  .ins-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .ins-head h2 {
+    margin: 0;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--mut);
+  }
+
+  .ins-body {
+    padding: 12px;
+    overflow: auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .icon {
+    padding: 2px 8px;
+  }
+
+  .mini {
+    padding: 2px 8px;
+    font-size: 11.5px;
+  }
+
+  .danger {
+    border-color: var(--bad);
+    color: var(--bad);
+  }
+
+  .danger:hover:not(:disabled) {
+    background: var(--sel);
+  }
+
+  .danger-ghost {
+    border-color: var(--line);
+    color: var(--dim);
+  }
+
+  h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--mut);
+    margin: 0;
+    font-weight: 600;
+  }
+
+  .sec {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .row.center {
+    justify-content: center;
+  }
+
+  .grid2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .grid3 {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+  }
+
+  .fld {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 11px;
+    color: var(--mut);
+  }
+
+  .fld input,
+  .fld select {
+    font: 12px var(--mono);
+    color: var(--ink);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    padding: 5px 7px;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .fld input:focus,
+  .fld select:focus {
+    border-color: var(--acc);
+    outline: none;
+  }
+
+  .fld input::placeholder {
+    color: var(--dim);
+  }
+
+  .iface {
+    border: 1px solid var(--line);
+    margin: 0;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .iface legend {
+    font: 11px var(--mono);
+    color: var(--acc);
+    padding: 0 4px;
+  }
+
+  .route {
+    border: 1px solid var(--line);
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .pair {
+    margin: 0;
+    font-size: 12px;
+    color: var(--ok);
+    overflow-wrap: anywhere;
+  }
+
+  .actions {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .actions li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border: 1px solid var(--line);
+    padding: 5px 8px;
+    font-size: 11.5px;
+  }
+
+  .actions li span {
+    overflow-wrap: anywhere;
+  }
+
+  .hint {
+    color: var(--dim);
+    font-size: 11.5px;
+    margin: 0;
+    line-height: 1.5;
+  }
+
+  .status {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    flex-wrap: wrap;
+    min-height: 32px;
+    padding: 4px 16px;
+    border-top: 1px solid var(--line);
+    background: var(--panel);
+    font: 11.5px var(--mono);
+    color: var(--mut);
+  }
+
+  .status > span:first-child {
+    max-width: 62ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .status .ok {
+    color: var(--ok);
+  }
+
+  .status .bad {
+    color: var(--bad);
+  }
+
+  .ghost {
+    position: fixed;
+    z-index: 50;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    background: var(--card);
+    border: 1px solid var(--acc);
+    color: var(--acc);
+    font: 12px var(--mono);
+  }
+
+  .empty-card {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: min(440px, 80vw);
+    background: var(--card);
+    border: 1px solid var(--line);
+    padding: 20px;
+    text-align: center;
+    z-index: 3;
+  }
+
+  .empty-card h2 {
+    margin: 0 0 8px;
+    font: 700 18px var(--disp);
+    letter-spacing: 0.4px;
+  }
+
+  .empty-card p {
+    color: var(--mut);
+    font-size: 13px;
+    line-height: 1.55;
+    margin: 0 0 14px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .port,
+    .plbl {
+      transition: none;
+    }
+  }
+
+  @media (max-width: 1100px) {
+    .inspector {
+      width: 320px;
+    }
+
+    .scen,
+    .pill {
+      display: none;
+    }
+  }
+
+  @media (max-width: 860px) {
+    .inspector {
+      left: 12px;
+      right: 12px;
+      top: auto;
+      bottom: 12px;
+      width: auto;
+      max-height: 46vh;
+    }
+
+    .palette {
+      left: 12px;
+      right: 12px;
+      top: 12px;
+      transform: none;
+      flex-direction: row;
+      overflow-x: auto;
+    }
+
+    .tool {
+      flex: 0 0 auto;
+    }
+
+    .linkbtn {
+      display: none;
+    }
+  }
+</style>

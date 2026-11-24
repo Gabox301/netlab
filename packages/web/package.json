@@ -10,6 +10,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@netlab/cli": "workspace:*",
     "@netlab/core": "workspace:*",
     "@netlab/protocols": "workspace:*",
     "@netlab/shell": "workspace:*"

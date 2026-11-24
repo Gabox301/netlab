@@ -67,6 +67,7 @@
       "name": "@netlab/web",
       "version": "0.0.0",
       "dependencies": {
+        "@netlab/cli": "workspace:*",
         "@netlab/core": "workspace:*",
         "@netlab/protocols": "workspace:*",
         "@netlab/shell": "workspace:*",

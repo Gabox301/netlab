@@ -365,6 +365,7 @@ function isNodeActive(id: string): boolean {
     <div class="scen mono">
       {result?.scenario ?? "dos-subredes"}.json · seed {result?.seed ?? 11}
     </div>
+    <a class="navlink" href="/editor">Editor →</a>
     <div class="sp"></div>
     <div class="simtime mono" role="timer" aria-label="Tiempo virtual">
       t = {scrubUs} µs
@@ -842,6 +843,20 @@ function isNodeActive(id: string): boolean {
 
   .sp {
     flex: 1;
+  }
+
+  .navlink {
+    color: var(--ink);
+    text-decoration: none;
+    border: 1px solid var(--line);
+    background: var(--panel2);
+    padding: 7px 13px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+
+  .navlink:hover {
+    border-color: var(--acc);
   }
 
   .simtime {
