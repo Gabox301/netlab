@@ -31,8 +31,10 @@ export {
   type ScenarioNode,
   type ScenarioPingAction,
   type ScenarioPingOptions,
+  type ScenarioPortDef,
   type ScenarioRouteDef,
   type ScenarioRouterPortDef,
   type ScenarioSendAction,
   type ScenarioShellAction,
+  type ScenarioVlanPortConfig,
 } from "./scenario";

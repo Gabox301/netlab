@@ -47,6 +47,14 @@ export interface ScenarioRouteDef {
 export interface ScenarioPortDef {
   name: string;
   mac?: string;
+  vlan?: ScenarioVlanPortConfig;
+}
+
+export interface ScenarioVlanPortConfig {
+  mode?: "access" | "trunk";
+  vlan?: number;
+  allowed?: Array<number>;
+  native?: number;
 }
 
 export interface ScenarioHostOpts {
@@ -373,6 +381,61 @@ function parseRouteDef(value: unknown, path: string): ScenarioRouteDef {
   return def;
 }
 
+function parseVlanId(value: unknown, path: string, what: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw fail(path, `${what} must be an integer VLAN id`);
+  }
+  if (value < 1 || value > 4094) {
+    throw fail(path, `${what} must be a VLAN id in 1..4094: ${value}`);
+  }
+  return value;
+}
+
+function parsePortVlan(value: unknown, path: string): ScenarioVlanPortConfig {
+  const obj = reqRecord(value, path);
+  const modeRaw = obj["mode"];
+  if (modeRaw !== undefined && modeRaw !== "access" && modeRaw !== "trunk") {
+    throw fail(path, `"mode" must be "access" | "trunk"`);
+  }
+  const mode = modeRaw as "access" | "trunk" | undefined;
+  const vlan: ScenarioVlanPortConfig = {};
+  if (mode !== undefined) {
+    vlan.mode = mode;
+  }
+  if (obj["vlan"] !== undefined) {
+    if (mode === "trunk") {
+      throw fail(path, `"vlan" is an access setting; use native on a trunk`);
+    }
+    vlan.vlan = parseVlanId(obj["vlan"], path, `"vlan"`);
+  }
+  if (obj["allowed"] !== undefined) {
+    if (mode !== "trunk") {
+      throw fail(path, `"allowed" is a trunk setting`);
+    }
+    const raw = obj["allowed"];
+    if (!Array.isArray(raw) || raw.length === 0) {
+      throw fail(path, `"allowed" must be a non-empty array of VLAN ids`);
+    }
+    vlan.allowed = raw.map((entry, i) =>
+      parseVlanId(entry, `${path}.allowed[${i}]`, `"allowed" entry`),
+    );
+  }
+  if (obj["native"] !== undefined) {
+    if (mode !== "trunk") {
+      throw fail(path, `"native" is a trunk setting`);
+    }
+    vlan.native = parseVlanId(obj["native"], path, `"native"`);
+  }
+  if (
+    vlan.native !== undefined &&
+    vlan.allowed !== undefined &&
+    !vlan.allowed.includes(vlan.native)
+  ) {
+    throw fail(path, `"native" must also be allowed`);
+  }
+  return vlan;
+}
+
 function parsePortDef(value: unknown, path: string): ScenarioPortDef {
   const obj = reqRecord(value, path);
   const name = reqString(obj, "name", path);
@@ -380,6 +443,9 @@ function parsePortDef(value: unknown, path: string): ScenarioPortDef {
   const def: ScenarioPortDef = { name };
   if (mac !== undefined) {
     def.mac = mac;
+  }
+  if (obj["vlan"] !== undefined) {
+    def.vlan = parsePortVlan(obj["vlan"], `${path}.vlan`);
   }
   return def;
 }
@@ -425,6 +491,11 @@ function parseNode(value: unknown, path: string): ScenarioNode {
       throw fail(path, `${type} ${JSON.stringify(id)} needs one port`);
     }
     if (type === "hub") {
+      for (const port of ports) {
+        if (port.vlan !== undefined) {
+          throw fail(path, `"vlan" is not supported on hub ports`);
+        }
+      }
       return { type: "hub", id, ports };
     }
     const agingTimeUs = optNumber(obj, "agingTimeUs", path);

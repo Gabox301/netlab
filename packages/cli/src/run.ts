@@ -122,7 +122,7 @@ export async function runScenario(
         node.agingTimeUs === undefined ? {} : { agingTimeUs: node.agingTimeUs },
       );
       for (const port of node.ports) {
-        const iface = sw.addPort(port.name, port.mac);
+        const iface = sw.addPort(port.name, port.mac, port.vlan);
         ifaces.set(ifaceKey(node.id, port.name), iface);
       }
       switches.set(node.id, sw);

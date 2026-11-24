@@ -57,7 +57,7 @@ export function formatHuman(result: RunResult): string {
       }
       for (const row of rows) {
         lines.push(
-          `    ${row.mac.toString()} -> ${row.port} (expires ${fmtTime(row.expiresAt)})`,
+          `    ${row.mac.toString()} -> ${row.port} vlan ${row.vlan} (expires ${fmtTime(row.expiresAt)})`,
         );
       }
     }
@@ -172,10 +172,13 @@ export function formatSummaryJson(result: RunResult): string {
 
 function macTablesJson(
   macTables: RunResult["macTables"],
-): Record<string, Array<{ mac: string; port: string; expiresAt: number }>> {
+): Record<
+  string,
+  Array<{ mac: string; port: string; vlan: number; expiresAt: number }>
+> {
   const out: Record<
     string,
-    Array<{ mac: string; port: string; expiresAt: number }>
+    Array<{ mac: string; port: string; vlan: number; expiresAt: number }>
   > = {};
   for (const [id, rows] of Object.entries(macTables).sort((a, b) =>
     a[0] < b[0] ? -1 : 1,
@@ -183,6 +186,7 @@ function macTablesJson(
     out[id] = rows.map((row) => ({
       mac: row.mac.toString(),
       port: row.port,
+      vlan: row.vlan,
       expiresAt: row.expiresAt,
     }));
   }

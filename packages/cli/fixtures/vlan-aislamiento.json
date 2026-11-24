@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "seed": 5,
+  "until": "2s",
+  "nodes": [
+    {
+      "type": "host",
+      "id": "h1",
+      "hostOpts": { "arpTimeoutUs": 200000, "arpRetries": 1 },
+      "interfaces": [
+        { "name": "eth0", "ip": "10.0.0.2", "mask": "255.255.255.0" }
+      ]
+    },
+    {
+      "type": "switch",
+      "id": "sw1",
+      "ports": [
+        { "name": "p1", "vlan": { "mode": "access", "vlan": 10 } },
+        { "name": "p2", "vlan": { "mode": "access", "vlan": 20 } },
+        { "name": "p3", "vlan": { "mode": "trunk", "allowed": [10, 20] } }
+      ]
+    },
+    {
+      "type": "switch",
+      "id": "sw2",
+      "ports": [
+        { "name": "p1", "vlan": { "mode": "trunk", "allowed": [10, 20] } },
+        { "name": "p2", "vlan": { "mode": "access", "vlan": 10 } }
+      ]
+    },
+    {
+      "type": "host",
+      "id": "h2",
+      "hostOpts": { "arpTimeoutUs": 200000, "arpRetries": 1 },
+      "interfaces": [
+        { "name": "eth0", "ip": "10.0.0.3", "mask": "255.255.255.0" }
+      ]
+    },
+    {
+      "type": "host",
+      "id": "h3",
+      "interfaces": [
+        { "name": "eth0", "ip": "10.0.0.4", "mask": "255.255.255.0" }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "a": { "node": "h1", "iface": "eth0" },
+      "b": { "node": "sw1", "iface": "p1" },
+      "params": { "latencyUs": 10 }
+    },
+    {
+      "id": "l2",
+      "a": { "node": "h2", "iface": "eth0" },
+      "b": { "node": "sw1", "iface": "p2" },
+      "params": { "latencyUs": 10 }
+    },
+    {
+      "id": "l3",
+      "a": { "node": "sw1", "iface": "p3" },
+      "b": { "node": "sw2", "iface": "p1" },
+      "params": { "latencyUs": 10 }
+    },
+    {
+      "id": "l4",
+      "a": { "node": "h3", "iface": "eth0" },
+      "b": { "node": "sw2", "iface": "p2" },
+      "params": { "latencyUs": 10 }
+    }
+  ],
+  "actions": [
+    {
+      "at": 0,
+      "host": "h1",
+      "destIp": "10.0.0.4",
+      "ping": { "count": 1, "size": 8, "interval": "1ms" }
+    },
+    {
+      "at": "1s",
+      "host": "h1",
+      "destIp": "10.0.0.3",
+      "ping": { "count": 1, "size": 8, "interval": "1ms" }
+    }
+  ]
+}
