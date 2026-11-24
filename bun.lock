@@ -21,6 +21,10 @@
     "packages/core": {
       "name": "@netlab/core",
       "version": "0.0.0",
+      "dependencies": {
+        "@netlab/bytes": "workspace:*",
+        "@netlab/protocols": "workspace:*",
+      },
     },
     "packages/exercises": {
       "name": "@netlab/exercises",
@@ -33,6 +37,9 @@
     "packages/protocols": {
       "name": "@netlab/protocols",
       "version": "0.0.0",
+      "dependencies": {
+        "@netlab/bytes": "workspace:*",
+      },
     },
     "packages/server": {
       "name": "@netlab/server",
