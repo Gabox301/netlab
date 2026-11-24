@@ -6,17 +6,37 @@
  * `number`; randomness flows only through `Simulation.random`.
  */
 
-export { Mulberry32 } from "./prng";
-export { DEFAULT_MAX_EVENTS, Simulation, type TimerHandle } from "./sim";
 export {
-  Link,
+  connect,
+  Device,
+  type InterfaceCounters,
+  type InterfaceOptions,
+  NetworkInterface,
+} from "./devices";
+export {
+  Host,
+  type HostInterfaceOptions,
+  type HostOptions,
+  type HostPayloadHandler,
+} from "./host";
+export {
   type BurstLoss,
+  Link,
   type LinkParams,
   type Port,
 } from "./link";
+export { Mulberry32 } from "./prng";
+export { DEFAULT_MAX_EVENTS, Simulation, type TimerHandle } from "./sim";
 export {
-  TraceBus,
+  DEFAULT_AGING_TIME_US,
+  Hub,
+  type MacTableEntry,
+  Switch,
+  type SwitchOptions,
+} from "./switch";
+export {
   type DropReason,
   type EndpointId,
   type Trace,
+  TraceBus,
 } from "./trace";
