@@ -8,3 +8,15 @@
 
 export { Mulberry32 } from "./prng";
 export { DEFAULT_MAX_EVENTS, Simulation, type TimerHandle } from "./sim";
+export {
+  Link,
+  type BurstLoss,
+  type LinkParams,
+  type Port,
+} from "./link";
+export {
+  TraceBus,
+  type DropReason,
+  type EndpointId,
+  type Trace,
+} from "./trace";
