@@ -1,0 +1,28 @@
+# Bun + Node
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Bun
+bun.lockb
+.bun-cache/
+
+# Env / OS
+.env
+.env.*
+.DS_Store
+Thumbs.db
+
+# Coverage / bench
+coverage/
+*.lcov
+
+# Capturas y snapshots locales (se regeneran por replay)
+*.pcap
+*.pcapng
+snapshots/
+
+# IDE
+.vscode/
+.idea/
