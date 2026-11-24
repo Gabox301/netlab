@@ -27,3 +27,4 @@ Objetivo: estructura base del monorepo para validar toolchain. Branch: `main` (a
 - L3 decisiones 2026-11-24: alcance "Solo setup monorepo" / lint "Biome (recomendado)" / repo "Sí, init + commit"
 - Evidencia entorno: WSL sin `bun` en PATH, sí `bun.exe` 1.4.5 en `/mnt/c/Users/gortega/scoop/persist/bun/bin/bun.exe` y `node.exe` v24.22.1; sin git repo. Se usará `bun.exe` desde WSL hasta normalizar PATH.
 - 2026-11-24 verificación: `bun install` ok, `bun test` 1 pass (bytes smoke), `tsc --noEmit` limpio tras agregar `bun-types`, `biome check .` limpio (32 archivos, fix de formato en package.json + fix de schema files.includes). Siguiente: commit inicial en main.
+- 2026-11-24 commit inicial: `549a8b9 chore: initial monorepo skeleton (fase 0 setup)` en `main`, working tree limpio.
