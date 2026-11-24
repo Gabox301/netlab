@@ -7,7 +7,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { formatHuman, formatJsonLines, formatMacTablesJson } from "./format";
+import { formatHuman, formatJsonLines, formatSummaryJson } from "./format";
 import { runScenario } from "./run";
 import { parseDurationToUs, parseScenarioText } from "./scenario";
 
@@ -105,13 +105,13 @@ async function main(argv: Array<string>): Promise<number> {
   }
   try {
     const scenario = parseScenarioText(text, args.file);
-    const result = runScenario(scenario, {
+    const result = await runScenario(scenario, {
       ...(args.seed === undefined ? {} : { seed: args.seed }),
       ...(args.untilUs === undefined ? {} : { untilUs: args.untilUs }),
     });
     if (args.format === "json") {
       process.stdout.write(formatJsonLines(result.traces));
-      process.stderr.write(`${formatMacTablesJson(result.macTables)}\n`);
+      process.stderr.write(`${formatSummaryJson(result)}\n`);
     } else {
       process.stdout.write(formatHuman(result));
     }

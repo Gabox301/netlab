@@ -62,6 +62,40 @@ export function formatHuman(result: RunResult): string {
       }
     }
   }
+  const routerIds = Object.keys(result.routes).sort();
+  if (routerIds.length === 0) {
+    lines.push("Routing tables: (none)");
+  } else {
+    lines.push("Routing tables:");
+    for (const id of routerIds) {
+      const rows = result.routes[id] ?? [];
+      lines.push(`  ${id}:`);
+      if (rows.length === 0) {
+        lines.push("    (empty)");
+      }
+      for (const row of rows) {
+        const via =
+          row.gateway === undefined ? "connected" : `via ${row.gateway}`;
+        lines.push(
+          `    ${row.destination} ${via} dev ${row.iface} metric ${row.metric} (${row.kind})`,
+        );
+      }
+    }
+  }
+  if (result.shellTranscripts.length === 0) {
+    lines.push("Shell: (no commands)");
+  } else {
+    lines.push("Shell:");
+    for (const entry of result.shellTranscripts) {
+      lines.push(`  ${entry.host}$ ${entry.command}`);
+      if (entry.error !== undefined) {
+        lines.push(`    error: ${entry.error}`);
+      }
+      for (const line of entry.lines ?? []) {
+        lines.push(`    ${line}`);
+      }
+    }
+  }
   return `${lines.join("\n")}\n`;
 }
 
@@ -124,6 +158,21 @@ export function formatJsonLines(traces: Array<Trace>): string {
 
 /** MAC tables as JSON (goes to stderr in `--format json`, keeping stdout pure). */
 export function formatMacTablesJson(macTables: RunResult["macTables"]): string {
+  return JSON.stringify({ macTables: macTablesJson(macTables) });
+}
+
+/** Full run summary (MAC tables, routes, shell transcripts) for stderr. */
+export function formatSummaryJson(result: RunResult): string {
+  return JSON.stringify({
+    macTables: macTablesJson(result.macTables),
+    routes: result.routes,
+    shell: result.shellTranscripts,
+  });
+}
+
+function macTablesJson(
+  macTables: RunResult["macTables"],
+): Record<string, Array<{ mac: string; port: string; expiresAt: number }>> {
   const out: Record<
     string,
     Array<{ mac: string; port: string; expiresAt: number }>
@@ -137,5 +186,5 @@ export function formatMacTablesJson(macTables: RunResult["macTables"]): string {
       expiresAt: row.expiresAt,
     }));
   }
-  return JSON.stringify({ macTables: out });
+  return out;
 }

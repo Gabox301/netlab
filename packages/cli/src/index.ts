@@ -5,10 +5,17 @@ export {
   formatHuman,
   formatJsonLines,
   formatMacTablesJson,
+  formatSummaryJson,
   formatTraceHuman,
   traceToJson,
 } from "./format";
-export { type RunOverrides, type RunResult, runScenario } from "./run";
+export {
+  type RouterTableRow,
+  type RunOverrides,
+  type RunResult,
+  runScenario,
+  type ShellTranscript,
+} from "./run";
 export {
   DEFAULT_UNTIL_US,
   type DurationInput,
@@ -19,7 +26,13 @@ export {
   parseScenarioText,
   SCENARIO_VERSION,
   type Scenario,
+  type ScenarioAction,
   type ScenarioLink,
   type ScenarioNode,
+  type ScenarioPingAction,
+  type ScenarioPingOptions,
+  type ScenarioRouteDef,
+  type ScenarioRouterPortDef,
   type ScenarioSendAction,
+  type ScenarioShellAction,
 } from "./scenario";

@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "seed": 11,
+  "until": "5s",
+  "nodes": [
+    {
+      "type": "host",
+      "id": "h1",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "mac": "02:00:00:00:00:0a",
+          "ip": "10.0.0.2",
+          "mask": "255.255.255.0",
+          "gateway": "10.0.0.1"
+        }
+      ]
+    },
+    {
+      "type": "router",
+      "id": "r1",
+      "interfaces": [
+        { "name": "p0", "ip": "10.0.0.1/24" },
+        { "name": "p1", "ip": "10.0.1.1/24" }
+      ]
+    },
+    {
+      "type": "host",
+      "id": "h2",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "mac": "02:00:00:00:00:0b",
+          "ip": "10.0.1.2",
+          "mask": "255.255.255.0",
+          "gateway": "10.0.1.1"
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "a": { "node": "h1", "iface": "eth0" },
+      "b": { "node": "r1", "iface": "p0" },
+      "params": { "latencyUs": 10 }
+    },
+    {
+      "id": "l2",
+      "a": { "node": "h2", "iface": "eth0" },
+      "b": { "node": "r1", "iface": "p1" },
+      "params": { "latencyUs": 10 }
+    }
+  ],
+  "actions": [
+    { "at": 0, "host": "h1", "exec": "traceroute 10.0.1.2" },
+    {
+      "at": "5ms",
+      "host": "h1",
+      "destIp": "10.0.1.2",
+      "ping": { "count": 2, "size": 32, "interval": "1ms" }
+    }
+  ]
+}

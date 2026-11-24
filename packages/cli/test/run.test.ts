@@ -65,8 +65,11 @@ function dosHosts(): Scenario {
   });
 }
 
-function traceSignature(scenario: Scenario, seed: number): Array<string> {
-  const result = runScenario(scenario, { seed });
+async function traceSignature(
+  scenario: Scenario,
+  seed: number,
+): Promise<Array<string>> {
+  const result = await runScenario(scenario, { seed });
   return result.traces.map((trace) => {
     if (trace.kind === "frame_tx" || trace.kind === "frame_rx") {
       return `${trace.kind}:${trace.link}:${trace.length}:${trace.t}`;
@@ -79,23 +82,25 @@ function traceSignature(scenario: Scenario, seed: number): Array<string> {
 }
 
 describe("netlab run", () => {
-  test("same seed replays the same trace sequence", () => {
+  test("same seed replays the same trace sequence", async () => {
     const scenario = dosHosts();
-    expect(traceSignature(scenario, 7)).toEqual(traceSignature(scenario, 7));
+    expect(await traceSignature(scenario, 7)).toEqual(
+      await traceSignature(scenario, 7),
+    );
   });
 
-  test("different seeds can diverge the run", () => {
+  test("different seeds can diverge the run", async () => {
     const scenario = dosHosts();
     // Jitter-free links make timing identical; loss would diverge. Here we
     // assert the mechanism: the seed is honored and reported.
-    const a = runScenario(scenario, { seed: 1 });
-    const b = runScenario(scenario, { seed: 2 });
+    const a = await runScenario(scenario, { seed: 1 });
+    const b = await runScenario(scenario, { seed: 2 });
     expect(a.seed).toBe(1);
     expect(b.seed).toBe(2);
   });
 
-  test("populates the switch MAC table and delivers IPv4", () => {
-    const result = runScenario(dosHosts());
+  test("populates the switch MAC table and delivers IPv4", async () => {
+    const result = await runScenario(dosHosts());
     const table = result.macTables["sw1"] ?? [];
     const byMac = new Map(table.map((row) => [row.mac.toString(), row.port]));
     expect(byMac.get("02:00:00:00:00:0a")).toBe("p1");
@@ -114,7 +119,7 @@ describe("netlab run", () => {
     expect(ipv4).toBeGreaterThan(0);
   });
 
-  test("reports host unreachable when ARP expires", () => {
+  test("reports host unreachable when ARP expires", async () => {
     const scenario = parseScenarioJson({
       version: 1,
       seed: 3,
@@ -151,15 +156,15 @@ describe("netlab run", () => {
         },
       ],
     });
-    const result = runScenario(scenario);
+    const result = await runScenario(scenario);
     const logs = result.traces.filter((trace) => trace.kind === "log");
     expect(
       logs.some((trace) => trace.message.includes("host unreachable")),
     ).toBe(true);
   });
 
-  test("human and json formatters agree on trace count", () => {
-    const result = runScenario(dosHosts());
+  test("human and json formatters agree on trace count", async () => {
+    const result = await runScenario(dosHosts());
     const human = formatHuman(result);
     expect(human).toContain("MAC tables:");
     expect(human).toContain("02:00:00:00:00:0a -> p1");
@@ -173,7 +178,7 @@ describe("netlab run", () => {
     );
   });
 
-  test("hub repeats without a MAC table", () => {
+  test("hub repeats without a MAC table", async () => {
     const scenario = parseScenarioJson({
       version: 1,
       seed: 7,
@@ -217,7 +222,7 @@ describe("netlab run", () => {
         { host: "h1", iface: "eth0", destIp: "10.0.0.2", payload: "via hub" },
       ],
     });
-    const result = runScenario(scenario);
+    const result = await runScenario(scenario);
     expect(result.macTables).toEqual({});
     expect(result.traces.length).toBeGreaterThan(0);
   });

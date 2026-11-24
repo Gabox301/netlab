@@ -22,6 +22,26 @@ export interface ScenarioInterfaceDef {
   name: string;
   mac?: string;
   ip?: string;
+  mask?: string;
+  prefixLength?: number;
+  gateway?: string;
+}
+
+export interface ScenarioRouterPortDef {
+  name: string;
+  mac?: string;
+  ip: string;
+  mask?: string;
+  prefixLength?: number;
+  mtu?: number;
+}
+
+export interface ScenarioRouteDef {
+  /** CIDR such as `10.0.1.0/24`; `0.0.0.0/0` installs the default route. */
+  destination: string;
+  gateway?: string;
+  iface: string;
+  metric?: number;
 }
 
 export interface ScenarioPortDef {
@@ -50,6 +70,12 @@ export type ScenarioNode =
       agingTimeUs?: number;
     }
   | {
+      type: "router";
+      id: string;
+      interfaces: Array<ScenarioRouterPortDef>;
+      routes?: Array<ScenarioRouteDef>;
+    }
+  | {
       type: "hub";
       id: string;
       ports: Array<ScenarioPortDef>;
@@ -59,6 +85,39 @@ export interface ScenarioLinkEndpoint {
   node: string;
   iface: string;
 }
+
+export interface ScenarioPingOptions {
+  /** Requests to send. Default 4. */
+  count?: number;
+  /** Echo data bytes. Default 56. */
+  size?: number;
+  /** IP TTL of the probes. Default 64. */
+  ttl?: number;
+  dontFragment?: boolean;
+  /** Spacing between requests. Default "1s". */
+  interval?: DurationInput;
+}
+
+export interface ScenarioPingAction {
+  /** Virtual time of the first request. Default 0. */
+  at?: DurationInput;
+  host: string;
+  iface?: string;
+  destIp: string;
+  ping: ScenarioPingOptions;
+}
+
+export interface ScenarioShellAction {
+  /** Virtual time the command runs. Default 0. */
+  at?: DurationInput;
+  host: string;
+  exec: string;
+}
+
+export type ScenarioAction =
+  | ScenarioSendAction
+  | ScenarioPingAction
+  | ScenarioShellAction;
 
 export interface ScenarioLink {
   id: string;
@@ -87,7 +146,7 @@ export interface Scenario {
   until?: DurationInput;
   nodes: Array<ScenarioNode>;
   links: Array<ScenarioLink>;
-  actions: Array<ScenarioSendAction>;
+  actions: Array<ScenarioAction>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -249,14 +308,67 @@ export function decodePayload(
 function parseInterfaceDef(value: unknown, path: string): ScenarioInterfaceDef {
   const obj = reqRecord(value, path);
   const name = reqString(obj, "name", path);
-  const mac = optString(obj, "mac", path);
-  const ip = optString(obj, "ip", path);
   const def: ScenarioInterfaceDef = { name };
+  for (const key of ["mac", "ip", "mask", "gateway"] as const) {
+    const text = optString(obj, key, path);
+    if (text !== undefined) {
+      def[key] = text;
+    }
+  }
+  const prefixLength = optNumber(obj, "prefixLength", path);
+  if (prefixLength !== undefined) {
+    def.prefixLength = prefixLength;
+  }
+  return def;
+}
+
+function parseRouterPortDef(
+  value: unknown,
+  path: string,
+): ScenarioRouterPortDef {
+  const obj = reqRecord(value, path);
+  const def: ScenarioRouterPortDef = {
+    name: reqString(obj, "name", path),
+    ip: reqString(obj, "ip", path),
+  };
+  const mac = optString(obj, "mac", path);
   if (mac !== undefined) {
     def.mac = mac;
   }
-  if (ip !== undefined) {
-    def.ip = ip;
+  const mask = optString(obj, "mask", path);
+  if (mask !== undefined) {
+    def.mask = mask;
+  }
+  const prefixLength = optNumber(obj, "prefixLength", path);
+  if (prefixLength !== undefined) {
+    def.prefixLength = prefixLength;
+  }
+  const mtu = optNumber(obj, "mtu", path);
+  if (mtu !== undefined) {
+    if (!Number.isInteger(mtu) || mtu < 68) {
+      throw fail(path, `"mtu" must be an integer >= 68: ${mtu}`);
+    }
+    def.mtu = mtu;
+  }
+  return def;
+}
+
+function parseRouteDef(value: unknown, path: string): ScenarioRouteDef {
+  const obj = reqRecord(value, path);
+  const def: ScenarioRouteDef = {
+    destination: reqString(obj, "destination", path),
+    iface: reqString(obj, "iface", path),
+  };
+  const gateway = optString(obj, "gateway", path);
+  if (gateway !== undefined) {
+    def.gateway = gateway;
+  }
+  const metric = optNumber(obj, "metric", path);
+  if (metric !== undefined) {
+    if (!Number.isInteger(metric) || metric < 0) {
+      throw fail(path, `"metric" must be an integer >= 0: ${metric}`);
+    }
+    def.metric = metric;
   }
   return def;
 }
@@ -322,7 +434,26 @@ function parseNode(value: unknown, path: string): ScenarioNode {
     }
     return node;
   }
-  throw fail(path, `"type" must be "host" | "switch" | "hub"`);
+  if (type === "router") {
+    const interfaces = reqArray(obj, "interfaces", path).map((entry, i) =>
+      parseRouterPortDef(entry, `${path}.interfaces[${i}]`),
+    );
+    if (interfaces.length === 0) {
+      throw fail(path, `router ${JSON.stringify(id)} needs one port`);
+    }
+    const routes =
+      obj["routes"] === undefined
+        ? undefined
+        : reqArray(obj, "routes", path).map((entry, i) =>
+            parseRouteDef(entry, `${path}.routes[${i}]`),
+          );
+    const node: ScenarioNode = { type: "router", id, interfaces };
+    if (routes !== undefined) {
+      node.routes = routes;
+    }
+    return node;
+  }
+  throw fail(path, `"type" must be "host" | "switch" | "hub" | "router"`);
 }
 
 function parseEndpoint(value: unknown, path: string): ScenarioLinkEndpoint {
@@ -346,17 +477,94 @@ function parseLink(value: unknown, path: string): ScenarioLink {
   return { id, a, b, params: params as unknown as LinkParams };
 }
 
-function parseAction(value: unknown, path: string): ScenarioSendAction {
+function optBoolean(
+  obj: Record<string, unknown>,
+  key: string,
+  path: string,
+): boolean | undefined {
+  const value = obj[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    throw fail(path, `"${key}" must be a boolean`);
+  }
+  return value;
+}
+
+function parseAction(value: unknown, path: string): ScenarioAction {
   const obj = reqRecord(value, path);
   const host = reqString(obj, "host", path);
+  let at: DurationInput | undefined;
+  if (obj["at"] !== undefined) {
+    const raw = obj["at"];
+    if (typeof raw !== "number" && typeof raw !== "string") {
+      throw fail(path, `"at" must be a duration string or microseconds`);
+    }
+    parseDurationToUs(raw, 0, `${path}.at`);
+    at = raw;
+  }
+  if (obj["exec"] !== undefined) {
+    const action: ScenarioShellAction = {
+      host,
+      exec: reqString(obj, "exec", path),
+    };
+    if (at !== undefined) {
+      action.at = at;
+    }
+    return action;
+  }
+  if (obj["ping"] !== undefined) {
+    const destIp = reqString(obj, "destIp", path);
+    const pingObj = reqRecord(obj["ping"], `${path}.ping`);
+    const ping: ScenarioPingOptions = {};
+    const count = optNumber(pingObj, "count", `${path}.ping`);
+    if (count !== undefined) {
+      if (!Number.isInteger(count) || count < 1 || count > 10000) {
+        throw fail(path, `"ping.count" must be an integer 1..10000`);
+      }
+      ping.count = count;
+    }
+    const size = optNumber(pingObj, "size", `${path}.ping`);
+    if (size !== undefined) {
+      if (!Number.isInteger(size) || size < 0 || size > 65500) {
+        throw fail(path, `"ping.size" must be an integer 0..65500`);
+      }
+      ping.size = size;
+    }
+    const ttl = optNumber(pingObj, "ttl", `${path}.ping`);
+    if (ttl !== undefined) {
+      if (!Number.isInteger(ttl) || ttl < 1 || ttl > 255) {
+        throw fail(path, `"ping.ttl" must be an integer 1..255`);
+      }
+      ping.ttl = ttl;
+    }
+    const dontFragment = optBoolean(pingObj, "dontFragment", `${path}.ping`);
+    if (dontFragment !== undefined) {
+      ping.dontFragment = dontFragment;
+    }
+    if (pingObj["interval"] !== undefined) {
+      const raw = pingObj["interval"];
+      if (typeof raw !== "number" && typeof raw !== "string") {
+        throw fail(path, `"ping.interval" must be a duration string or number`);
+      }
+      parseDurationToUs(raw, 0, `${path}.ping.interval`);
+      ping.interval = raw;
+    }
+    const action: ScenarioPingAction = { host, destIp, ping };
+    const iface = optString(obj, "iface", path);
+    if (iface !== undefined) {
+      action.iface = iface;
+    }
+    if (at !== undefined) {
+      action.at = at;
+    }
+    return action;
+  }
   const iface = reqString(obj, "iface", path);
   const destIp = reqString(obj, "destIp", path);
   const action: ScenarioSendAction = { host, iface, destIp };
-  if (obj["at"] !== undefined) {
-    const at = obj["at"];
-    if (typeof at !== "number" && typeof at !== "string") {
-      throw fail(path, `"at" must be a duration string or microseconds`);
-    }
+  if (at !== undefined) {
     action.at = at;
   }
   if (obj["etherType"] !== undefined) {
