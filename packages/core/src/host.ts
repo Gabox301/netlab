@@ -1,6 +1,6 @@
 /**
- * End host: Ethernet interfaces plus an ARP cache with a pending queue
- * (F-12, F-13, F-19, F-20, F-21).
+ * End host: Ethernet interfaces, an ARP cache with a pending queue
+ * (F-12, F-13, F-19, F-20, F-21) and IPv4 delivery (F-30 to F-39).
  *
  * ARP here is deliberately synchronous (decision S13): `sendTo()` consults
  * the cache and either transmits immediately or queues the frame and sends
@@ -8,9 +8,14 @@
  * Nothing awaits a promise, so tests advance virtual time with
  * `sim.runAll()` / `runUntil()` only.
  *
- * IPv4 itself is phase 2 (decision S16). An address is an identity in the
- * ARP table and the source field of outgoing frames; the caller supplies
- * EtherType and payload.
+ * IPv4 integration is additive. `sendTo()` still takes an explicit L3
+ * payload; with a mask configured it resolves the next hop (on-link
+ * destination or gateway) before ARP. `sendIpv4()` / `sendPing()` build the
+ * datagram themselves and route by configured interface. Inbound datagrams
+ * are reassembled when fragmented (S3), and ICMP Echo Requests to a local
+ * address are answered automatically; replies and errors surface through
+ * `onEchoReply` / `onIcmpError` for the shell. The original `onPayload` hook
+ * still receives every accepted non-ARP payload, IPv4 included.
  *
  * Cache discipline: every ARP packet refreshes `senderIp -> senderMac`, which
  * covers gratuitous announcements and lets a request resolve a pending entry
@@ -24,10 +29,23 @@ import {
   ARP_OP_REQUEST,
   type ArpPacket,
   ETHERTYPE_ARP,
+  ETHERTYPE_IPV4,
+  ICMP_CODE_FRAG_NEEDED,
+  ICMP_TYPE_DEST_UNREACHABLE,
+  ICMP_TYPE_ECHO_REPLY,
+  ICMP_TYPE_ECHO_REQUEST,
+  type IcmpMessage,
+  IPV4_PROTOCOL_ICMP,
+  IPV4_VERSION,
+  type Ipv4Packet,
   parseArp,
   parseEthernet,
+  parseIcmp,
+  parseIpv4,
   serializeArp,
   serializeEthernet,
+  serializeIcmp,
+  serializeIpv4,
   shouldAccept,
 } from "@netlab/protocols";
 import {
@@ -35,6 +53,18 @@ import {
   type InterfaceOptions,
   type NetworkInterface,
 } from "./devices";
+import {
+  isFragmented,
+  Reassembler,
+  type ReassemblyOptions,
+} from "./reassembly";
+import {
+  DEFAULT_IPV4_TTL,
+  prefixToMask,
+  resolveOptionalPrefix,
+  sameSubnet,
+  splitIpv4Prefix,
+} from "./route";
 import type { Simulation, TimerHandle } from "./sim";
 import type { TraceBus } from "./trace";
 
@@ -57,10 +87,105 @@ export type HostPayloadHandler = (
   payload: Uint8Array,
 ) => void;
 
+/** Narrowed ICMP variants used by the receive path. */
+type IcmpEcho = Extract<IcmpMessage, { kind: "echo" }>;
+type IcmpError = Extract<IcmpMessage, { kind: "error" }>;
+
 /** Per-interface configuration for `Host.addInterface()`. */
 export interface HostInterfaceOptions extends InterfaceOptions {
-  /** IPv4 identity used as the ARP sender address. */
+  /** IPv4 identity used as the ARP sender address; `ip/prefix` accepted. */
   ip?: string;
+  /** Dotted subnet mask (`255.255.255.0`), alternative to prefixLength. */
+  mask?: string;
+  /** Subnet prefix length (0..32), alternative to mask. */
+  prefixLength?: number;
+  /** Default next hop for destinations outside the local subnet. */
+  gateway?: string;
+}
+
+/** Mutable IPv4 configuration accepted by `Host.setIpConfig()`. */
+export interface HostIpConfigInput {
+  ip: string;
+  /** Omitted means "keep the current prefix". */
+  mask?: string;
+  /** Omitted means "keep the current prefix". */
+  prefixLength?: number;
+  /** `null` clears the gateway; omitted keeps it. */
+  gateway?: string | null;
+}
+
+/** Snapshot of one interface's IPv4 configuration. */
+export interface HostIpConfig {
+  iface: string;
+  ip: Ipv4Address;
+  prefixLength: number | undefined;
+  mask: Ipv4Address | undefined;
+  gateway: Ipv4Address | undefined;
+}
+
+/** Options for `Host.sendIpv4()`. */
+export interface HostIpv4SendOptions {
+  /** IPv4 TTL; default 64, minimum 1. */
+  ttl?: number;
+  /** Set DF on the generated datagram. Default false. */
+  dontFragment?: boolean;
+  /** IP identification; default a per-host counter. */
+  identification?: number;
+  /** Egress interface; default the configured route/gateway. */
+  iface?: string;
+}
+
+/** Options for `Host.sendPing()`. */
+export interface HostPingOptions extends HostIpv4SendOptions {
+  identifier?: number;
+  sequence?: number;
+  /** ICMP echo data length; default 56. Ignored when `data` is set. */
+  size?: number;
+  /** Explicit echo data (overrides `size`). */
+  data?: Uint8Array;
+}
+
+/** Result of queueing one Echo Request. */
+export interface HostPingHandle {
+  iface: string;
+  destIp: string;
+  identifier: number;
+  sequence: number;
+  /** Echo data bytes carried by the request. */
+  size: number;
+  ttl: number;
+  dontFragment: boolean;
+  /** Virtual time the request was handed to IPv4. */
+  sentAt: number;
+}
+
+/** Delivered Echo Reply, as reported by `Host.onEchoReply`. */
+export interface HostEchoReply {
+  iface: string;
+  srcIp: string;
+  dstIp: string;
+  identifier: number;
+  sequence: number;
+  data: Uint8Array;
+  ttl: number;
+  /** Round-trip time for a request this host sent, else undefined. */
+  rttUs: number | undefined;
+}
+
+/** Delivered ICMP error, as reported by `Host.onIcmpError`. */
+export interface HostIcmpError {
+  iface: string;
+  /** Source of the ICMP error (usually the router that failed us). */
+  from: string;
+  type: number;
+  code: number;
+  /** Next-hop MTU for type 3 code 4; undefined otherwise. */
+  mtu: number | undefined;
+  /** Start of the offending datagram (header + 8 payload bytes). */
+  embedded: Uint8Array;
+  /** Destination of the offending datagram, when its header parses. */
+  originalDst: string | undefined;
+  ttl: number;
 }
 
 /** Host tunables, all overridable per instance. */
@@ -75,6 +200,14 @@ export interface HostOptions {
   arpQueueLimit?: number;
   /** Initial payload hook. */
   onPayload?: HostPayloadHandler;
+  /** Initial Echo Reply hook (ping). */
+  onEchoReply?: (reply: HostEchoReply) => void;
+  /** Initial ICMP error hook (traceroute, PMTU discovery). */
+  onIcmpError?: (error: HostIcmpError) => void;
+  /** How long partial inbound datagrams stay buffered. */
+  reassemblyTimeoutUs?: number;
+  /** Fragment-payload memory budget for inbound reassembly. */
+  reassemblyMaxBytes?: number;
 }
 
 /** A frame waiting for the address resolution of its next hop. */
@@ -99,7 +232,34 @@ interface ArpEntry {
 interface HostPort {
   iface: NetworkInterface;
   ip: Ipv4Address | undefined;
+  prefixLength: number | undefined;
+  gateway: Ipv4Address | undefined;
   arp: Map<string, ArpEntry>;
+}
+
+/** Default Echo Request payload: 56 data bytes (64-byte ICMP message). */
+const DEFAULT_PING_SIZE = 56;
+
+/** Identifier every `sendPing()` request uses unless overridden. */
+const PING_IDENTIFIER = 0x4e4c;
+
+/** Unanswered requests remembered for RTT calculation (oldest evicted). */
+const MAX_PENDING_PINGS = 1024;
+
+function checkByteField(name: string, value: number): void {
+  if (!Number.isInteger(value) || value < 0 || value > 0xff) {
+    throw new RangeError(`${name} must be a byte 0..255: ${value}`);
+  }
+}
+
+function checkU16Field(name: string, value: number): void {
+  if (!Number.isInteger(value) || value < 0 || value > 0xffff) {
+    throw new RangeError(`${name} must be 0..65535: ${value}`);
+  }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function checkDuration(name: string, value: number): number {
@@ -126,12 +286,20 @@ function checkLimit(name: string, value: number): number {
 export class Host extends Device {
   /** Called for every accepted non-ARP payload. */
   onPayload: HostPayloadHandler | undefined = undefined;
+  /** Called for every ICMP Echo Reply addressed to this host. */
+  onEchoReply: ((reply: HostEchoReply) => void) | undefined = undefined;
+  /** Called for every ICMP error addressed to this host. */
+  onIcmpError: ((error: HostIcmpError) => void) | undefined = undefined;
 
   private readonly arpTtlUs: number;
   private readonly arpTimeoutUs: number;
   private readonly arpRetries: number;
   private readonly arpQueueLimit: number;
   private readonly ports = new Map<string, HostPort>();
+  private readonly reassembler: Reassembler;
+  private readonly pendingPings = new Map<string, number>();
+  private ipId = 1;
+  private pingSequence = 0;
 
   constructor(
     sim: Simulation,
@@ -157,9 +325,27 @@ export class Host extends Device {
       opts.arpQueueLimit ?? DEFAULT_ARP_QUEUE_LIMIT,
     );
     this.onPayload = opts.onPayload;
+    this.onEchoReply = opts.onEchoReply;
+    this.onIcmpError = opts.onIcmpError;
+    const reassembly: ReassemblyOptions = {
+      onExpire: (expiry) =>
+        this.log(
+          this.id,
+          "warn",
+          `reassembly timeout for ${expiry.key.src} -> ${expiry.key.dst} ` +
+            `id=${expiry.key.identification} (${expiry.bytes} bytes dropped)`,
+        ),
+    };
+    if (opts.reassemblyTimeoutUs !== undefined) {
+      reassembly.timeoutUs = opts.reassemblyTimeoutUs;
+    }
+    if (opts.reassemblyMaxBytes !== undefined) {
+      reassembly.maxBytes = opts.reassemblyMaxBytes;
+    }
+    this.reassembler = new Reassembler(sim, reassembly);
   }
 
-  /** Create an interface, optionally with a MAC and an IPv4 address. */
+  /** Create an interface, optionally with a MAC and an IPv4 configuration. */
   override addInterface(
     name: string,
     opts: HostInterfaceOptions = {},
@@ -168,9 +354,12 @@ export class Host extends Device {
       name,
       opts.mac === undefined ? {} : { mac: opts.mac },
     );
+    const addressing = this.parseInterfaceAddress(opts);
     this.ports.set(name, {
       iface,
-      ip: opts.ip === undefined ? undefined : Ipv4Address.parse(opts.ip),
+      ip: addressing.ip,
+      prefixLength: addressing.prefixLength,
+      gateway: addressing.gateway,
       arp: new Map(),
     });
     return iface;
@@ -182,11 +371,65 @@ export class Host extends Device {
   }
 
   /**
+   * Set the full IPv4 configuration of an interface. Omitted `mask` /
+   * `prefixLength` keep the current prefix, omitted `gateway` keeps the
+   * current gateway and `gateway: null` removes it.
+   */
+  setIpConfig(ifaceName: string, config: HostIpConfigInput): void {
+    const cfg = this.portOf(ifaceName);
+    const split = splitIpv4Prefix(config.ip);
+    let prefixLength = cfg.prefixLength;
+    let ip: Ipv4Address;
+    if (split !== undefined) {
+      if (config.mask !== undefined || config.prefixLength !== undefined) {
+        throw new Error(
+          `ip ${JSON.stringify(config.ip)} already carries a prefix; ` +
+            `remove mask/prefixLength`,
+        );
+      }
+      ip = split.ip;
+      prefixLength = split.prefixLength;
+    } else {
+      ip = Ipv4Address.parse(config.ip);
+      const resolved = resolveOptionalPrefix(config.mask, config.prefixLength);
+      if (resolved !== undefined) {
+        prefixLength = resolved;
+      }
+    }
+    cfg.ip = ip;
+    cfg.prefixLength = prefixLength;
+    if (config.gateway !== undefined) {
+      cfg.gateway =
+        config.gateway === null ? undefined : Ipv4Address.parse(config.gateway);
+    }
+  }
+
+  /** Snapshot of an interface's IPv4 configuration; undefined without IP. */
+  getIpConfig(ifaceName: string): HostIpConfig | undefined {
+    const cfg = this.portOf(ifaceName);
+    const ip = cfg.ip;
+    if (ip === undefined) {
+      return undefined;
+    }
+    return {
+      iface: cfg.iface.name,
+      ip,
+      prefixLength: cfg.prefixLength,
+      mask:
+        cfg.prefixLength === undefined
+          ? undefined
+          : prefixToMask(cfg.prefixLength),
+      gateway: cfg.gateway,
+    };
+  }
+
+  /**
    * Send an L3 payload to `destIp` through `ifaceName`.
    *
-   * Resolves the next hop from the ARP cache, or queues the frame and starts
-   * a resolution. Throws when the interface has no source address: ARP
-   * cannot ask on behalf of a host without one.
+   * Resolves the next hop from the interface mask/gateway (destination on
+   * link, gateway otherwise), then from the ARP cache, or queues the frame
+   * and starts a resolution. Throws when the interface has no source
+   * address, or when the destination is off-subnet and no gateway is set.
    */
   sendTo(
     ifaceName: string,
@@ -209,24 +452,91 @@ export class Host extends Device {
         `${this.id}:${ifaceName}: interface is not attached to a link`,
       );
     }
-    const known = this.arpLookup(ifaceName, destIp);
-    if (known !== undefined) {
-      this.sendRaw(ifaceName, known, etherType, payload);
-      return;
-    }
-    const entry = this.entryFor(cfg, Ipv4Address.parse(destIp));
-    if (entry.pending.length >= this.arpQueueLimit) {
-      this.log(
-        `${this.id}:${ifaceName}`,
-        "warn",
-        `ARP queue full for ${destIp}: dropped ${payload.length}-byte frame`,
+    const nextHop = this.nextHopFor(cfg, Ipv4Address.parse(destIp));
+    this.transmit(cfg, nextHop, etherType, payload);
+  }
+
+  /**
+   * Send one IPv4 datagram of arbitrary protocol through the configured
+   * route (or `opts.iface`). Throws synchronously on routing/ARP setup
+   * errors, exactly like `sendTo()`.
+   */
+  sendIpv4(
+    destIp: string,
+    protocol: number,
+    payload: Uint8Array,
+    opts: HostIpv4SendOptions = {},
+  ): void {
+    const destination = Ipv4Address.parse(destIp);
+    const path = this.interfaceFor(destination, opts.iface);
+    this.emitIpv4(path.cfg, destination, protocol, payload, path.nextHop, opts);
+  }
+
+  /**
+   * Build and send one ICMP Echo Request. The reply is delivered through
+   * `onEchoReply` (with `rttUs` when this host sent the request).
+   */
+  sendPing(destIp: string, opts: HostPingOptions = {}): HostPingHandle {
+    const destination = Ipv4Address.parse(destIp);
+    const identifier = opts.identifier ?? PING_IDENTIFIER;
+    checkU16Field("identifier", identifier);
+    const sequence = opts.sequence ?? this.nextPingSequence();
+    checkU16Field("sequence", sequence);
+    const size =
+      opts.data === undefined
+        ? (opts.size ?? DEFAULT_PING_SIZE)
+        : opts.data.length;
+    if (!Number.isInteger(size) || size < 0 || size > 65507) {
+      throw new RangeError(
+        `ping payload size must be an integer 0..65507: ${size}`,
       );
-      return;
     }
-    entry.pending.push({ etherType, payload });
-    if (entry.timer === undefined) {
-      this.startResolution(cfg, entry);
+    if (opts.size !== undefined && opts.size !== size) {
+      throw new RangeError(
+        `ping size ${opts.size} disagrees with data length ${size}`,
+      );
     }
+    const data =
+      opts.data === undefined ? new Uint8Array(size) : opts.data.slice();
+    const message = serializeIcmp({
+      kind: "echo",
+      type: ICMP_TYPE_ECHO_REQUEST,
+      code: 0,
+      identifier,
+      sequence,
+      data,
+    });
+
+    // Select the path before touching any state so a routing error is a
+    // plain synchronous throw with nothing queued (same contract as sendTo).
+    const path = this.interfaceFor(destination, opts.iface);
+    this.emitIpv4(
+      path.cfg,
+      destination,
+      IPV4_PROTOCOL_ICMP,
+      message,
+      path.nextHop,
+      opts,
+    );
+
+    const sentAt = this.sim.now;
+    this.pendingPings.set(`${identifier}:${sequence}`, sentAt);
+    if (this.pendingPings.size > MAX_PENDING_PINGS) {
+      const oldest = this.pendingPings.keys().next();
+      if (oldest.done !== true) {
+        this.pendingPings.delete(oldest.value);
+      }
+    }
+    return {
+      iface: path.cfg.iface.name,
+      destIp: destIp,
+      identifier,
+      sequence,
+      size,
+      ttl: opts.ttl ?? DEFAULT_IPV4_TTL,
+      dontFragment: opts.dontFragment ?? false,
+      sentAt,
+    };
   }
 
   /** Transmit a frame with an explicit destination MAC, bypassing ARP. */
@@ -244,13 +554,7 @@ export class Host extends Device {
 
   /** Resolved MAC for `ip`, or undefined when unknown or past its TTL. */
   arpLookup(ifaceName: string, ip: string): MacAddress | undefined {
-    const entry = this.portOf(ifaceName).arp.get(
-      Ipv4Address.parse(ip).toString(),
-    );
-    if (entry === undefined || entry.mac === undefined) {
-      return undefined;
-    }
-    return entry.expiresAt > this.sim.now ? entry.mac : undefined;
+    return this.macFor(this.portOf(ifaceName), Ipv4Address.parse(ip));
   }
 
   onFrame(iface: NetworkInterface, frame: Uint8Array): void {
@@ -268,7 +572,361 @@ export class Host extends Device {
       this.receiveArp(iface, eth.payload);
       return;
     }
+    if (eth.etherType === ETHERTYPE_IPV4) {
+      this.receiveIpv4(iface, eth.payload);
+    }
+    // Legacy hook: every accepted non-ARP payload still reaches it, even
+    // when IPv4 above already handled the datagram.
     this.onPayload?.(iface, eth.etherType, eth.payload);
+  }
+
+  /** Configured IPv4 path: explicit iface, direct subnet, then gateway. */
+  private interfaceFor(
+    destination: Ipv4Address,
+    ifaceName?: string,
+  ): { cfg: HostPort; nextHop: Ipv4Address } {
+    if (ifaceName !== undefined) {
+      const cfg = this.portOf(ifaceName);
+      return { cfg, nextHop: this.nextHopFor(cfg, destination) };
+    }
+    const ports = [...this.ports.values()];
+    for (const cfg of ports) {
+      if (
+        cfg.ip !== undefined &&
+        cfg.prefixLength !== undefined &&
+        sameSubnet(cfg.ip, destination, cfg.prefixLength)
+      ) {
+        return { cfg, nextHop: destination };
+      }
+    }
+    for (const cfg of ports) {
+      if (cfg.ip !== undefined && cfg.gateway !== undefined) {
+        return { cfg, nextHop: cfg.gateway };
+      }
+    }
+    const addressed = ports.filter((cfg) => cfg.ip !== undefined);
+    const only = addressed[0];
+    if (addressed.length === 0) {
+      throw new Error(`${this.id}: no IPv4 address configured`);
+    }
+    if (
+      only !== undefined &&
+      addressed.length === 1 &&
+      only.prefixLength === undefined
+    ) {
+      // Legacy single-interface hosts without a mask keep ARPing the
+      // destination directly, exactly as `sendTo()` always did.
+      return { cfg: only, nextHop: destination };
+    }
+    throw new Error(
+      `${this.id}: no route to ${destination}: no interface in its subnet ` +
+        `and no gateway configured`,
+    );
+  }
+
+  /** Next hop for one interface: on-link destination or configured gateway. */
+  private nextHopFor(cfg: HostPort, destination: Ipv4Address): Ipv4Address {
+    const ip = cfg.ip;
+    if (ip === undefined) {
+      throw new Error(
+        `${this.id}:${cfg.iface.name}: no IPv4 address configured`,
+      );
+    }
+    if (cfg.prefixLength !== undefined) {
+      if (sameSubnet(ip, destination, cfg.prefixLength)) {
+        return destination;
+      }
+      if (cfg.gateway !== undefined) {
+        return cfg.gateway;
+      }
+      throw new Error(
+        `${this.id}:${cfg.iface.name}: no route to ${destination}: ` +
+          `outside ${ip.toString()}/${cfg.prefixLength} and no gateway`,
+      );
+    }
+    if (cfg.gateway !== undefined) {
+      return cfg.gateway;
+    }
+    return destination;
+  }
+
+  private macFor(cfg: HostPort, ip: Ipv4Address): MacAddress | undefined {
+    const entry = cfg.arp.get(ip.toString());
+    if (entry === undefined || entry.mac === undefined) {
+      return undefined;
+    }
+    return entry.expiresAt > this.sim.now ? entry.mac : undefined;
+  }
+
+  /** Resolve `nextHop` through ARP and put the frame on the wire. */
+  private transmit(
+    cfg: HostPort,
+    nextHop: Ipv4Address,
+    etherType: number,
+    payload: Uint8Array,
+  ): void {
+    const mac = this.macFor(cfg, nextHop);
+    if (mac !== undefined) {
+      this.sendRaw(cfg.iface.name, mac, etherType, payload);
+      return;
+    }
+    const entry = this.entryFor(cfg, nextHop);
+    if (entry.pending.length >= this.arpQueueLimit) {
+      this.log(
+        `${this.id}:${cfg.iface.name}`,
+        "warn",
+        `ARP queue full for ${nextHop}: dropped ${payload.length}-byte frame`,
+      );
+      return;
+    }
+    entry.pending.push({ etherType, payload });
+    if (entry.timer === undefined) {
+      this.startResolution(cfg, entry);
+    }
+  }
+
+  /** Build and transmit one IPv4 datagram from `cfg` via `nextHop`. */
+  private emitIpv4(
+    cfg: HostPort,
+    destination: Ipv4Address,
+    protocol: number,
+    payload: Uint8Array,
+    nextHop: Ipv4Address,
+    opts: HostIpv4SendOptions,
+    source: Ipv4Address | undefined = undefined,
+  ): void {
+    const ip = cfg.ip;
+    if (ip === undefined) {
+      throw new Error(
+        `${this.id}:${cfg.iface.name}: no IPv4 address configured`,
+      );
+    }
+    if (!cfg.iface.up) {
+      throw new Error(`${this.id}:${cfg.iface.name}: interface is down`);
+    }
+    if (!cfg.iface.attached) {
+      throw new Error(
+        `${this.id}:${cfg.iface.name}: interface is not attached to a link`,
+      );
+    }
+    const ttl = opts.ttl ?? DEFAULT_IPV4_TTL;
+    if (!Number.isInteger(ttl) || ttl < 1 || ttl > 0xff) {
+      throw new RangeError(`IPv4 TTL must be an integer 1..255: ${ttl}`);
+    }
+    checkByteField("protocol", protocol);
+    const identification = opts.identification ?? this.nextIpId();
+    checkU16Field("identification", identification);
+    const datagram = serializeIpv4(
+      {
+        version: IPV4_VERSION,
+        ihl: 5,
+        dscp: 0,
+        ecn: 0,
+        totalLength: 0,
+        identification,
+        flags: {
+          reserved: false,
+          dontFragment: opts.dontFragment ?? false,
+          moreFragments: false,
+        },
+        fragmentOffset: 0,
+        ttl,
+        protocol,
+        checksum: 0,
+        src: source ?? ip,
+        dst: destination,
+        options: new Uint8Array(0),
+      },
+      payload,
+    );
+    this.transmit(cfg, nextHop, ETHERTYPE_IPV4, datagram);
+  }
+
+  private nextIpId(): number {
+    const id = this.ipId;
+    this.ipId = (this.ipId + 1) & 0xffff;
+    return id;
+  }
+
+  private nextPingSequence(): number {
+    this.pingSequence = (this.pingSequence % 0xffff) + 1;
+    return this.pingSequence;
+  }
+
+  private parseInterfaceAddress(opts: HostInterfaceOptions): {
+    ip: Ipv4Address | undefined;
+    prefixLength: number | undefined;
+    gateway: Ipv4Address | undefined;
+  } {
+    const gateway =
+      opts.gateway === undefined ? undefined : Ipv4Address.parse(opts.gateway);
+    if (opts.ip === undefined) {
+      if (
+        gateway !== undefined ||
+        opts.mask !== undefined ||
+        opts.prefixLength !== undefined
+      ) {
+        throw new Error(`${this.id}: mask/prefixLength/gateway require an ip`);
+      }
+      return { ip: undefined, prefixLength: undefined, gateway: undefined };
+    }
+    const split = splitIpv4Prefix(opts.ip);
+    if (split !== undefined) {
+      if (opts.mask !== undefined || opts.prefixLength !== undefined) {
+        throw new Error(
+          `ip ${JSON.stringify(opts.ip)} already carries a prefix; ` +
+            `remove mask/prefixLength`,
+        );
+      }
+      return {
+        ip: split.ip,
+        prefixLength: split.prefixLength,
+        gateway,
+      };
+    }
+    return {
+      ip: Ipv4Address.parse(opts.ip),
+      prefixLength: resolveOptionalPrefix(opts.mask, opts.prefixLength),
+      gateway,
+    };
+  }
+
+  /** IPv4 delivery for this host: reassemble, then dispatch ICMP (S3). */
+  private receiveIpv4(iface: NetworkInterface, payload: Uint8Array): void {
+    const parsed = parseIpv4(payload);
+    if (!parsed.ok) {
+      // Not ours to interpret: the legacy `onPayload` hook still sees it.
+      return;
+    }
+    const packet = parsed.value;
+    if (!this.ownsAddress(packet.header.dst)) {
+      return;
+    }
+    if (isFragmented(packet)) {
+      const result = this.reassembler.add(packet);
+      if (result.kind === "complete") {
+        this.deliverIpv4(iface, result.packet);
+      }
+      return;
+    }
+    this.deliverIpv4(iface, packet);
+  }
+
+  private ownsAddress(ip: Ipv4Address): boolean {
+    for (const cfg of this.ports.values()) {
+      if (cfg.ip?.equals(ip) === true) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private deliverIpv4(iface: NetworkInterface, packet: Ipv4Packet): void {
+    if (packet.header.protocol !== IPV4_PROTOCOL_ICMP) {
+      return;
+    }
+    const parsed = parseIcmp(packet.payload);
+    if (!parsed.ok) {
+      return;
+    }
+    const message = parsed.value;
+    if (message.kind === "echo") {
+      if (message.type === ICMP_TYPE_ECHO_REQUEST) {
+        this.replyToEcho(iface, packet.header.src, message);
+      } else if (message.type === ICMP_TYPE_ECHO_REPLY) {
+        this.notifyEchoReply(iface, packet, message);
+      }
+      return;
+    }
+    if (message.kind === "error") {
+      this.notifyIcmpError(iface, packet, message);
+    }
+  }
+
+  /** Answer an Echo Request addressed to this host, on the ingress link. */
+  private replyToEcho(
+    iface: NetworkInterface,
+    source: Ipv4Address,
+    request: IcmpEcho,
+  ): void {
+    const ingress = this.portOf(iface.name);
+    if (ingress.ip === undefined) {
+      return;
+    }
+    const reply = serializeIcmp({
+      kind: "echo",
+      type: ICMP_TYPE_ECHO_REPLY,
+      code: 0,
+      identifier: request.identifier,
+      sequence: request.sequence,
+      data: request.data.slice(),
+    });
+    try {
+      // Replies follow the normal route: direct when the sender is on our
+      // subnet, through the gateway otherwise.
+      const path = this.interfaceFor(source);
+      this.emitIpv4(
+        path.cfg,
+        source,
+        IPV4_PROTOCOL_ICMP,
+        reply,
+        path.nextHop,
+        {},
+        ingress.ip,
+      );
+    } catch (err) {
+      this.log(
+        `${this.id}:${iface.name}`,
+        "warn",
+        `cannot answer echo from ${source}: ${errorMessage(err)}`,
+      );
+    }
+  }
+
+  private notifyEchoReply(
+    iface: NetworkInterface,
+    packet: Ipv4Packet,
+    message: IcmpEcho,
+  ): void {
+    const key = `${message.identifier}:${message.sequence}`;
+    const sentAt = this.pendingPings.get(key);
+    if (sentAt !== undefined) {
+      this.pendingPings.delete(key);
+    }
+    this.onEchoReply?.({
+      iface: iface.name,
+      srcIp: packet.header.src.toString(),
+      dstIp: packet.header.dst.toString(),
+      identifier: message.identifier,
+      sequence: message.sequence,
+      data: message.data.slice(),
+      ttl: packet.header.ttl,
+      rttUs: sentAt === undefined ? undefined : this.sim.now - sentAt,
+    });
+  }
+
+  private notifyIcmpError(
+    iface: NetworkInterface,
+    packet: Ipv4Packet,
+    message: IcmpError,
+  ): void {
+    const embedded = message.embedded.slice();
+    const parsed = parseIpv4(embedded);
+    const mtu =
+      message.type === ICMP_TYPE_DEST_UNREACHABLE &&
+      message.code === ICMP_CODE_FRAG_NEEDED
+        ? message.unused & 0xffff
+        : undefined;
+    this.onIcmpError?.({
+      iface: iface.name,
+      from: packet.header.src.toString(),
+      type: message.type,
+      code: message.code,
+      mtu,
+      embedded,
+      originalDst: parsed.ok ? parsed.value.header.dst.toString() : undefined,
+      ttl: packet.header.ttl,
+    });
   }
 
   private receiveArp(iface: NetworkInterface, payload: Uint8Array): void {
