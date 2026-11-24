@@ -1,0 +1,27 @@
+{
+  "title": "NetLab — vista principal del laboratorio",
+  "brief": "Pantalla principal de NetLab para un estudiante de redes: armar una red, correr ping/traceroute e inspeccionar bytes. Contenido real del escenario dos-subredes (seed 11).",
+  "artboards": [
+    {
+      "file": "01-workbench.html",
+      "title": "Workbench de 3 columnas (prototipo interactivo Rojo señal)",
+      "tradeoff": "Todo visible a la vez para uso experto; más denso e intimidante para principiantes",
+      "width": 1440,
+      "height": 900
+    },
+    {
+      "file": "02-canvas.html",
+      "title": "Lienzo protagonista",
+      "tradeoff": "Foco espacial y calma visual; el inspector exige seleccionar y hay más clics",
+      "width": 1440,
+      "height": 900
+    },
+    {
+      "file": "03-guiada.html",
+      "title": "Laboratorio guiado",
+      "tradeoff": "Guía el aprendizaje y prepara el modo práctica; rígido para exploración libre",
+      "width": 1440,
+      "height": 900
+    }
+  ]
+}
