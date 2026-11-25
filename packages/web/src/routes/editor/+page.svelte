@@ -9,11 +9,17 @@ import {
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
   canConnect,
+  canRedoHistory,
+  canUndoHistory,
+  createHistory,
   DEVICE_GLYPH,
   DEVICE_KINDS,
   type DeviceKind,
   describeAction,
   exampleTopology,
+  historyPush,
+  historyRedo,
+  historyUndo,
   interfaceAnchor,
   interfaceLink,
   kindLabel,
@@ -30,6 +36,7 @@ import {
   renameNode,
   type Topology,
   type TopologyEndpoint,
+  type TopologyHistory,
   type TopologyInterface,
   type TopologyLink,
   type TopologyNode,
@@ -75,6 +82,9 @@ const MAX_X = CANVAS_WIDTH - NODE_WIDTH - MIN_X;
 const MAX_Y = CANVAS_HEIGHT - NODE_HEIGHT - MIN_Y;
 
 let topology = $state<Topology>(exampleTopology());
+let history = $state<TopologyHistory>(createHistory());
+/** True while a drag/key-hold/text session shares one undo step. */
+let coalescing = false;
 let selection = $state<Selection>(null);
 let tool = $state<Tool>("select");
 let pending = $state<TopologyEndpoint | null>(null);
@@ -99,6 +109,8 @@ let fileInput: HTMLInputElement | null = null;
 
 const selectedNode = $derived(selectedNodeOf());
 const selectedLink = $derived(selectedLinkOf());
+const canUndo = $derived(canUndoHistory(history));
+const canRedo = $derived(canRedoHistory(history));
 const hostNodes = $derived(
   topology.nodes.filter((node) => node.kind === "host"),
 );
@@ -135,6 +147,61 @@ function plural(count: number, one: string, many: string): string {
 
 function setNotice(kind: NoticeKind, text: string): void {
   notice = { kind, text };
+}
+
+function snapshotTopology(): Topology {
+  return structuredClone($state.snapshot(topology));
+}
+
+/** Record the pre-mutation state; call before mutating `topology`. */
+function checkpoint(): void {
+  history = historyPush(history, snapshotTopology());
+}
+
+/**
+ * Coalesced gestures (drag, arrow-key hold, text typing) share one undo
+ * step: the first call records the snapshot, the rest are no-ops until
+ * `endCoalesced` (pointer-up, key-up, focus leaving the inspector).
+ */
+function beginCoalesced(): void {
+  if (!coalescing) {
+    checkpoint();
+    coalescing = true;
+  }
+}
+
+function endCoalesced(): void {
+  coalescing = false;
+}
+
+function applyHistoryStep(snapshot: Topology, text: string): void {
+  topology = snapshot;
+  pending = null;
+  cableCursor = null;
+  nodeDrag = null;
+  paletteDrag = null;
+  coalescing = false;
+  setNotice("info", text);
+}
+
+function onUndo(): void {
+  const undone = historyUndo(history, snapshotTopology());
+  if (undone === null) {
+    setNotice("info", "Nada que deshacer.");
+    return;
+  }
+  history = undone.history;
+  applyHistoryStep(undone.snapshot, "Deshecho.");
+}
+
+function onRedo(): void {
+  const redone = historyRedo(history, snapshotTopology());
+  if (redone === null) {
+    setNotice("info", "Nada que rehacer.");
+    return;
+  }
+  history = redone.history;
+  applyHistoryStep(redone.snapshot, "Rehecho.");
 }
 
 function endpointLabel(endpoint: TopologyEndpoint): string {
@@ -217,6 +284,8 @@ function freeSpot(): { x: number; y: number } {
 }
 
 function loadTopology(next: Topology, text: string): void {
+  checkpoint();
+  coalescing = false;
   topology = next;
   selection = null;
   pending = null;
@@ -241,6 +310,7 @@ function placeNode(kind: DeviceKind, x: number, y: number): void {
     clamp(x, MIN_X, MAX_X),
     clamp(y, MIN_Y, MAX_Y),
   );
+  checkpoint();
   topology = placed.topology;
   selection = { kind: "node", name: placed.name };
   setNotice("ok", `${kindLabel(kind)} ${placed.name} agregado al lienzo.`);
@@ -299,6 +369,7 @@ function onWindowPointerMove(event: PointerEvent): void {
   if (node === undefined) {
     return;
   }
+  beginCoalesced();
   node.x = Math.round(clamp(point.x - drag.dx, MIN_X, MAX_X));
   node.y = Math.round(clamp(point.y - drag.dy, MIN_Y, MAX_Y));
 }
@@ -324,6 +395,7 @@ function onWindowPointerUp(event: PointerEvent): void {
   }
   if (nodeDrag !== null && event.pointerId === nodeDrag.pointerId) {
     nodeDrag = null;
+    endCoalesced();
   }
 }
 
@@ -389,6 +461,7 @@ function onNodeKeyDown(event: KeyboardEvent, node: TopologyNode): void {
   if (current === undefined) {
     return;
   }
+  beginCoalesced();
   current.x = clamp(current.x + delta[0], MIN_X, MAX_X);
   current.y = clamp(current.y + delta[1], MIN_Y, MAX_Y);
   selection = { kind: "node", name: node.name };
@@ -453,6 +526,7 @@ function activatePort(node: TopologyNode, ifaceName: string): void {
   try {
     const from = pending;
     const linked = addLink(topology, from, endpoint);
+    checkpoint();
     topology = linked.topology;
     pending = null;
     cableCursor = null;
@@ -504,9 +578,42 @@ function setSelectTool(): void {
 }
 
 function onWindowKeyDown(event: KeyboardEvent): void {
+  const mod = event.ctrlKey || event.metaKey;
+  if (mod && (event.key === "z" || event.key === "Z")) {
+    // Inside a field the native text undo wins; elsewhere undo the canvas.
+    const target = event.target;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement
+    ) {
+      return;
+    }
+    event.preventDefault();
+    if (event.shiftKey) {
+      onRedo();
+    } else {
+      onUndo();
+    }
+    return;
+  }
+  if (mod && (event.key === "y" || event.key === "Y")) {
+    const target = event.target;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement
+    ) {
+      return;
+    }
+    event.preventDefault();
+    onRedo();
+    return;
+  }
   if (event.key !== "Escape") {
     return;
   }
+  endCoalesced();
   if (pending !== null) {
     pending = null;
     cableCursor = null;
@@ -530,7 +637,9 @@ function onWindowKeyDown(event: KeyboardEvent): void {
 function onRenameNode(node: TopologyNode, event: Event): void {
   const input = event.currentTarget as HTMLInputElement;
   try {
-    topology = renameNode(topology, node.name, input.value);
+    const next = renameNode(topology, node.name, input.value);
+    checkpoint();
+    topology = next;
     selection = { kind: "node", name: input.value.trim() };
     setNotice("ok", `Dispositivo renombrado a ${input.value.trim()}.`);
   } catch (error) {
@@ -546,7 +655,9 @@ function onRenameInterface(
 ): void {
   const input = event.currentTarget as HTMLInputElement;
   try {
-    topology = renameInterface(topology, node.name, iface.name, input.value);
+    const next = renameInterface(topology, node.name, iface.name, input.value);
+    checkpoint();
+    topology = next;
     setNotice("ok", `${node.name}: interfaz ${input.value.trim()} lista.`);
   } catch (error) {
     input.value = iface.name;
@@ -560,12 +671,14 @@ function onIfaceField(
   event: Event,
 ): void {
   const input = event.currentTarget as HTMLInputElement;
+  beginCoalesced();
   iface[field] = input.value;
 }
 
 function onVlanModeChange(iface: TopologyInterface, event: Event): void {
   const select = event.currentTarget as HTMLSelectElement;
   const mode = select.value;
+  checkpoint();
   if (mode === "default") {
     iface.vlan = null;
     return;
@@ -590,12 +703,14 @@ function onVlanField(
   if (vlan === null) {
     return;
   }
+  beginCoalesced();
   vlan[field] = input.value;
 }
 
 function onAddInterface(node: TopologyNode): void {
   try {
     const added = addInterface(topology, node.name);
+    checkpoint();
     topology = added.topology;
     setNotice("ok", `${node.name}: interfaz ${added.name} agregada.`);
   } catch (error) {
@@ -609,6 +724,7 @@ function onRemoveInterface(node: TopologyNode, iface: TopologyInterface): void {
       (link.a.node === node.name && link.a.iface === iface.name) ||
       (link.b.node === node.name && link.b.iface === iface.name),
   ).length;
+  checkpoint();
   topology = removeInterface(topology, node.name, iface.name);
   setNotice(
     "ok",
@@ -617,11 +733,13 @@ function onRemoveInterface(node: TopologyNode, iface: TopologyInterface): void {
 }
 
 function onAddRoute(node: TopologyNode, destination = "10.0.0.0/24"): void {
+  checkpoint();
   topology = addRoute(topology, node.name, destination);
   setNotice("ok", `${node.name}: ruta ${destination} agregada.`);
 }
 
 function onRemoveRoute(node: TopologyNode, index: number): void {
+  checkpoint();
   topology = removeRoute(topology, node.name, index);
   setNotice("ok", `${node.name}: ruta eliminada.`);
 }
@@ -632,21 +750,25 @@ function onRouteField(
   event: Event,
 ): void {
   const input = event.currentTarget as HTMLInputElement;
+  beginCoalesced();
   route[field] = input.value;
 }
 
 function onRouteIfaceChange(route: TopologyRoute, event: Event): void {
   const select = event.currentTarget as HTMLSelectElement;
+  checkpoint();
   route.iface = select.value;
 }
 
 function onRemoveNode(node: TopologyNode): void {
+  checkpoint();
   topology = removeNode(topology, node.name);
   selection = null;
   setNotice("ok", `${node.name} eliminado del lienzo.`);
 }
 
 function onRemoveSelectedLink(link: TopologyLink): void {
+  checkpoint();
   topology = removeLink(topology, link.id);
   selection = null;
   setNotice("ok", `Cable ${link.id} eliminado.`);
@@ -660,12 +782,15 @@ function onLatencyChange(link: TopologyLink, event: Event): void {
     setNotice("error", "La latencia debe ser un entero ≥ 0 (µs).");
     return;
   }
+  checkpoint();
   link.params.latencyUs = value;
 }
 
 function onApplyPreset(link: TopologyLink, preset: LinkPresetId): void {
   try {
-    topology = applyLinkPreset(topology, link.id, preset);
+    const next = applyLinkPreset(topology, link.id, preset);
+    checkpoint();
+    topology = next;
     selection = { kind: "link", id: link.id };
     setNotice(
       "ok",
@@ -690,6 +815,7 @@ function onJitterChange(link: TopologyLink, event: Event): void {
     setNotice("error", "El jitter debe ser ≥ 0 (µs), o vacío.");
     return;
   }
+  checkpoint();
   link.params.jitterUs = value;
 }
 
@@ -711,6 +837,7 @@ function onRateChange(
     setNotice("error", `${field} debe estar entre 0 y 1, o vacío.`);
     return;
   }
+  checkpoint();
   link.params[field] = value;
 }
 
@@ -730,6 +857,7 @@ function onBandwidthChange(link: TopologyLink, event: Event): void {
     setNotice("error", "El ancho de banda debe ser > 0 (bps), o vacío.");
     return;
   }
+  checkpoint();
   link.params.bandwidthBps = value;
 }
 
@@ -747,6 +875,7 @@ function onMtuChange(link: TopologyLink, event: Event): void {
     setNotice("error", "La MTU debe ser un entero > 0 (bytes), o vacío.");
     return;
   }
+  checkpoint();
   link.params.mtuBytes = value;
 }
 
@@ -766,16 +895,19 @@ function onQueueLimitChange(link: TopologyLink, event: Event): void {
     setNotice("error", "El límite de cola debe ser un entero > 0, o vacío.");
     return;
   }
+  checkpoint();
   link.params.queueLimit = value;
 }
 
 function onAddBurst(link: TopologyLink): void {
+  checkpoint();
   link.params.burst = { pGoodToBad: 0.02, pBadToGood: 0.4 };
   link.params.lossRate = undefined;
   setNotice("info", `Cable ${link.id}: ráfagas activas (reemplazan pérdida).`);
 }
 
 function onClearBurst(link: TopologyLink): void {
+  checkpoint();
   link.params.burst = undefined;
 }
 
@@ -795,6 +927,7 @@ function onBurstField(
     setNotice("error", `${field} debe estar entre 0 y 1.`);
     return;
   }
+  checkpoint();
   burst[field] = value;
 }
 
@@ -806,11 +939,13 @@ function onSeedChange(event: Event): void {
     setNotice("error", "seed debe ser un entero ≥ 0.");
     return;
   }
+  checkpoint();
   topology.seed = value;
 }
 
 function onUntilInput(event: Event): void {
   const input = event.currentTarget as HTMLInputElement;
+  beginCoalesced();
   topology.until = input.value;
 }
 
@@ -820,6 +955,7 @@ function onFilenameInput(event: Event): void {
 }
 
 function onRemoveAction(index: number): void {
+  checkpoint();
   topology.actions = topology.actions.filter(
     (_, actionIndex) => actionIndex !== index,
   );
@@ -853,6 +989,7 @@ function addPing(): void {
     destIp,
     ping: { count, size, ...(interval === "" ? {} : { interval }) },
   };
+  checkpoint();
   topology.actions = [...topology.actions, action];
   setNotice("ok", `Ping ${pingDraft.host} → ${destIp} agregado.`);
 }
@@ -1030,6 +1167,7 @@ function exportJson(): void {
           aria-label={`Dispositivo ${node.name} (${kindLabel(node.kind)})`}
           onpointerdown={(event) => onNodePointerDown(event, node)}
           onkeydown={(event) => onNodeKeyDown(event, node)}
+          onkeyup={endCoalesced}
         >
           <rect
             class="node"
@@ -1135,9 +1273,29 @@ function exportJson(): void {
       >
         <span class="glyph" aria-hidden="true">∿</span><small>cable</small>
       </button>
+      <button
+        type="button"
+        class="tool"
+        title="Deshacer (Ctrl+Z)"
+        aria-label="Deshacer"
+        disabled={!canUndo}
+        onclick={onUndo}
+      >
+        <span class="glyph" aria-hidden="true">↩</span><small>undo</small>
+      </button>
+      <button
+        type="button"
+        class="tool"
+        title="Rehacer (Ctrl+Mayús+Z)"
+        aria-label="Rehacer"
+        disabled={!canRedo}
+        onclick={onRedo}
+      >
+        <span class="glyph" aria-hidden="true">↪</span><small>redo</small>
+      </button>
     </nav>
 
-    <aside class="inspector" aria-label="Propiedades">
+    <aside class="inspector" aria-label="Propiedades" onfocusout={endCoalesced}>
       {#if selectedNode}
         {@const node = selectedNode}
         <div class="ins-head">
@@ -2113,6 +2271,11 @@ function exportJson(): void {
   .tool.on {
     border-color: var(--acc);
     background: var(--sel);
+  }
+
+  .tool:disabled {
+    opacity: 0.35;
+    cursor: default;
   }
 
   .tool.on small {

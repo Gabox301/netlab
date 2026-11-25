@@ -165,6 +165,89 @@ export function applyLinkPreset(
   return { ...topology, links };
 }
 
+/* ------------------------------------------------------------------------- */
+/* History (F-84): undo/redo over whole-topology snapshots.                  */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Undo/redo over whole-topology snapshots.
+ *
+ * Several editor handlers mutate `topology` in place (drag, text fields,
+ * link params), so snapshots are deep-cloned on the way in and on the way
+ * out: holding a reference never observes a later edit. `structuredClone`
+ * (not JSON) keeps `undefined` keys and refuses the unserializable
+ * `Infinity` the core uses as its queue default — the editor only ever
+ * stores `undefined` for "unset".
+ */
+export interface TopologyHistory {
+  past: Array<Topology>;
+  future: Array<Topology>;
+}
+
+/** Max undo steps kept; older snapshots drop off the front. */
+export const HISTORY_LIMIT = 100;
+
+export function createHistory(): TopologyHistory {
+  return { past: [], future: [] };
+}
+
+/** Record the pre-mutation snapshot; any redo stack is discarded. */
+export function historyPush(
+  history: TopologyHistory,
+  snapshot: Topology,
+  limit: number = HISTORY_LIMIT,
+): TopologyHistory {
+  const past = [...history.past, structuredClone(snapshot)];
+  while (past.length > limit) {
+    past.shift();
+  }
+  return { past, future: [] };
+}
+
+/** Step back; the live state moves to the redo stack. Null when empty. */
+export function historyUndo(
+  history: TopologyHistory,
+  current: Topology,
+): { history: TopologyHistory; snapshot: Topology } | null {
+  const previous = history.past[history.past.length - 1];
+  if (previous === undefined) {
+    return null;
+  }
+  return {
+    history: {
+      past: history.past.slice(0, -1),
+      future: [structuredClone(current), ...history.future],
+    },
+    snapshot: structuredClone(previous),
+  };
+}
+
+/** Step forward; the live state moves back to the undo stack. Null when empty. */
+export function historyRedo(
+  history: TopologyHistory,
+  current: Topology,
+): { history: TopologyHistory; snapshot: Topology } | null {
+  const next = history.future[0];
+  if (next === undefined) {
+    return null;
+  }
+  return {
+    history: {
+      past: [...history.past, structuredClone(current)],
+      future: history.future.slice(1),
+    },
+    snapshot: structuredClone(next),
+  };
+}
+
+export function canUndoHistory(history: TopologyHistory): boolean {
+  return history.past.length > 0;
+}
+
+export function canRedoHistory(history: TopologyHistory): boolean {
+  return history.future.length > 0;
+}
+
 export type DeviceKind = "host" | "switch" | "router" | "hub";
 
 export const DEVICE_KINDS: ReadonlyArray<DeviceKind> = [
