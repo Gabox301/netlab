@@ -20,18 +20,24 @@
  * The server hands out pool addresses, remembers one lease per hardware
  * address, answers DHCPOFFER to a Discover and DHCPACK to a Request it can
  * honour, and NAKs a Request for an address somebody else holds. Anything
- * else is ignored. Leases never expire inside a simulation: there is no
- * renewal or rebinding timer (F-73 covers acquisition), and the lease-time
- * option is carried for the client and the shell.
+ * else is ignored. Every bound lease carries its expiry (`now + lease-time`,
+ * from the `sim` option) and the server prunes expired ones lazily, on the
+ * next message or `getLeases()` call, so the address returns to the pool and
+ * can be reassigned — a Request for an address an expired lease used to hold
+ * is NAKed once somebody else owns it. A Request that renews a live lease
+ * (same hardware address, same address) only moves its expiry forward.
  *
- * The client is a four-state machine — `discover`, `request`, `bound` and
- * the terminal `failed` — driven only by `Simulation` timers. Each attempt
- * arms one timer and resends its message; after `retries` retransmissions it
- * gives up. A DHCPNAK drops the pending offer and restarts discovery with a
- * fresh transaction id. On the Ack it applies `Host.setIpConfig()` plus the
- * gateway and remembers the DNS servers for the shell. Transaction ids come
- * from `Simulation.random` and `secs` from `Simulation.now`: no `Math.random`
- * and no wall clock anywhere in this module.
+ * The client walks `discover` -> `request` -> `bound` and, when `autoRenew` is
+ * on, `renew` (unicast at T1 = 50% of the lease) -> `rebind` (broadcast at
+ * T2 = 87.5%) -> a fresh discovery when the lease runs out; `failed` is
+ * terminal. Every phase is driven only by `Simulation` timers. Each DORA
+ * attempt arms one timer and resends its message; after `retries`
+ * retransmissions the client gives up. A DHCPNAK drops the pending offer and
+ * restarts discovery with a fresh transaction id. On every Ack it applies
+ * `Host.setIpConfig()` plus the gateway, remembers the DNS servers for the
+ * shell and re-arms the lease timers. Transaction ids come from
+ * `Simulation.random` and `secs` from `Simulation.now`: no `Math.random` and
+ * no wall clock anywhere in this module.
  */
 
 import { Ipv4Address, MacAddress } from "@netlab/bytes";
@@ -78,6 +84,12 @@ export const DEFAULT_DHCP_TIMEOUT_US = 4_000_000;
 
 /** Default retransmissions after the first attempt (total = retries + 1). */
 export const DEFAULT_DHCP_RETRIES = 3;
+
+/** Fraction of the lease at which a bound client renews (T1, RFC 2131 §4.4.5). */
+export const DHCP_RENEW_RATIO = 0.5;
+
+/** Fraction of the lease at which a renewing client rebinds by broadcast (T2). */
+export const DHCP_REBIND_RATIO = 0.875;
 
 const UNSPECIFIED = "0.0.0.0";
 const LIMITED_BROADCAST = "255.255.255.255";
@@ -302,6 +314,12 @@ export interface DhcpLease {
   /** Leased IPv4 address, dotted decimal. */
   ip: string;
   state: DhcpLeaseState;
+  /**
+   * Virtual time the bound lease expires; undefined while it is only offered
+   * (an Offer reserves the address until the client Requests it) and on a
+   * server built without a `sim` clock.
+   */
+  expiresAt?: number;
 }
 
 /** Counters of the messages a {@link DhcpServer} processed. */
@@ -333,6 +351,11 @@ export interface DhcpServerOptions {
   leaseTimeSeconds?: number;
   /** Server identifier; default the interface address. */
   serverIp?: string;
+  /**
+   * Simulation clock used to stamp and prune lease expiries. Without it the
+   * server has no clock and its leases never expire.
+   */
+  sim?: Simulation;
 }
 
 /**
@@ -341,7 +364,8 @@ export interface DhcpServerOptions {
  * Allocates from `pool` in order, keeps one lease per hardware address and
  * answers on the interface the request arrived on. It is silent when the
  * pool is exhausted (RFC 2131 §4.3.1), so a client keeps retrying instead of
- * being told to wait.
+ * being told to wait. With a `sim` clock every bound lease expires
+ * `lease-time` after it was granted or last renewed.
  */
 export class DhcpServer {
   readonly host: Host;
@@ -362,6 +386,7 @@ export class DhcpServer {
   };
 
   private readonly leases = new Map<string, DhcpLease>();
+  private readonly clock: Simulation | undefined;
   private readonly detach: () => void;
   private ipId = 1;
 
@@ -412,6 +437,7 @@ export class DhcpServer {
     this.leaseTimeSeconds = checkLeaseSeconds(
       options.leaseTimeSeconds ?? DEFAULT_DHCP_LEASE_TIME_SECONDS,
     );
+    this.clock = options.sim;
     this.detach = attachDhcpReceiver(
       this.host,
       DHCP_SERVER_PORT,
@@ -421,9 +447,42 @@ export class DhcpServer {
     );
   }
 
-  /** Leases in allocation order. */
+  /** Virtual time in microseconds, or undefined without a `sim` clock. */
+  private get nowUs(): number | undefined {
+    return this.clock?.now;
+  }
+
+  /** Leases in allocation order; expired ones are dropped first. */
   getLeases(): DhcpLease[] {
+    this.pruneExpired();
     return [...this.leases.values()].map((lease) => ({ ...lease }));
+  }
+
+  /**
+   * Drop leases past their expiry so their addresses return to the pool.
+   *
+   * Expiry is lazy on purpose: a lease nobody asks about needs no timer, and
+   * a simulation that drains its event queue (`runAll()`) must not be kept
+   * alive by bookkeeping the next request would redo anyway.
+   */
+  private pruneExpired(now: number | undefined = this.nowUs): void {
+    if (now === undefined) {
+      return;
+    }
+    for (const [key, lease] of this.leases) {
+      if (lease.expiresAt !== undefined && now >= lease.expiresAt) {
+        this.leases.delete(key);
+      }
+    }
+  }
+
+  /** Expiry stamped on a lease granted right now, or undefined without a clock. */
+  private leaseExpiry(): number | undefined {
+    const now = this.nowUs;
+    if (now === undefined) {
+      return undefined;
+    }
+    return now + this.leaseTimeSeconds * MICROS_PER_SECOND;
   }
 
   /** Stop serving and restore the host hooks. Idempotent. */
@@ -432,6 +491,10 @@ export class DhcpServer {
   }
 
   private handle(iface: string, message: DhcpMessage, unicast: boolean): void {
+    // Every request sees an up-to-date pool: a lease that ran out while the
+    // segment was quiet is reusable (and, once reused, a renewal of it is
+    // NAKed like any other address nobody owns).
+    this.pruneExpired();
     if (message.op !== DHCP_OP_REQUEST) {
       this.stats.ignored += 1;
       return;
@@ -497,10 +560,14 @@ export class DhcpServer {
       this.sendNak(iface, message, mac);
       return;
     }
+    // A renewal lands here too: same hardware address, same address, live
+    // lease, so only the expiry moves and the client keeps its configuration.
+    const expiresAt = this.leaseExpiry();
     this.leases.set(mac.toString(), {
       mac: mac.toString(),
       ip: wanted,
       state: "bound",
+      ...(expiresAt === undefined ? {} : { expiresAt }),
     });
     this.stats.acks += 1;
     // A Request that reached the socket already carried the address the
@@ -620,6 +687,8 @@ export type DhcpClientState =
   | "discover"
   | "request"
   | "bound"
+  | "renew"
+  | "rebind"
   | "failed";
 
 /** The lease a {@link DhcpClient} applied to its interface. */
@@ -637,6 +706,12 @@ export interface DhcpClientLease {
   leaseTimeSeconds: number | undefined;
   /** Virtual time the Ack arrived. */
   acquiredAt: number;
+  /**
+   * Virtual time the lease dies (`acquiredAt` + lease time); undefined when
+   * the Ack carried no lease-time, which leaves the client with a lease it
+   * cannot expire.
+   */
+  expiresAt: number | undefined;
 }
 
 /** Counters of the messages a {@link DhcpClient} sent and accepted. */
@@ -660,6 +735,17 @@ export interface DhcpClientOptions {
   timeoutUs?: number;
   /** Retransmissions; default {@link DEFAULT_DHCP_RETRIES}. */
   retries?: number;
+  /**
+   * Follow the lease timers: renew at T1 (50% of the lease, unicast to the
+   * server that granted it), rebind at T2 (87.5%, broadcast) and go back to
+   * discovery when the lease runs out.
+   *
+   * Off by default. A renewing client never stops scheduling events, so a
+   * `Simulation` that drains its queue (`runAll()`) would never finish; the
+   * scenarios that want the lifecycle turn it on and drive the clock with
+   * `runUntil()`.
+   */
+  autoRenew?: boolean;
   /** Initial state-change hook. */
   onStateChange?: (state: DhcpClientState) => void;
 }
@@ -676,6 +762,13 @@ interface DhcpOffer {
  * attempt arms one `Simulation` timer; a timeout retransmits the current
  * message, and after `retries` retransmissions the client stops in `failed`.
  * A DHCPNAK discards the offer and starts over with a fresh transaction id.
+ *
+ * With `autoRenew` the Ack also arms the lease timers: `renew` unicasts a
+ * Request to the server identifier at T1 (50% of the lease), `rebind`
+ * broadcasts it at T2 (87.5%) when that server stopped answering, and the
+ * lease deadline itself sends the client back to discovery with the address
+ * cleared. Both renewing messages carry the leased address in `ciaddr`, so a
+ * server recognises the lease and only moves its expiry (RFC 2131 §4.3.2).
  */
 export class DhcpClient {
   readonly host: Host;
@@ -693,6 +786,7 @@ export class DhcpClient {
 
   private readonly timeoutUs: number;
   private readonly retries: number;
+  private readonly autoRenew: boolean;
   private readonly mac: MacAddress;
   private readonly detach: () => void;
   private stateValue: DhcpClientState = "idle";
@@ -713,6 +807,7 @@ export class DhcpClient {
       options.timeoutUs ?? DEFAULT_DHCP_TIMEOUT_US,
     );
     this.retries = checkRetries(options.retries ?? DEFAULT_DHCP_RETRIES);
+    this.autoRenew = options.autoRenew ?? false;
     this.mac = this.host.getInterface(this.iface).mac;
     this.onStateChange = options.onStateChange;
     this.detach = attachDhcpReceiver(
@@ -768,7 +863,12 @@ export class DhcpClient {
     if (message.op !== DHCP_OP_REPLY) {
       return;
     }
-    if (this.stateValue !== "discover" && this.stateValue !== "request") {
+    if (
+      this.stateValue !== "discover" &&
+      this.stateValue !== "request" &&
+      this.stateValue !== "renew" &&
+      this.stateValue !== "rebind"
+    ) {
       return;
     }
     if (message.xid !== this.xid) {
@@ -779,7 +879,11 @@ export class DhcpClient {
     }
     const type = dhcpMessageType(message.options);
     if (type === DHCP_MESSAGE_OFFER) {
-      this.onOffer(message);
+      // An Offer only matters while acquiring; during the lease lifecycle the
+      // client already owns an address.
+      if (this.stateValue === "discover" || this.stateValue === "request") {
+        this.onOffer(message);
+      }
       return;
     }
     if (type === DHCP_MESSAGE_ACK) {
@@ -810,7 +914,10 @@ export class DhcpClient {
 
   private onAck(message: DhcpMessage): void {
     this.stats.acks += 1;
-    const ip = message.yiaddr === UNSPECIFIED ? this.offer?.ip : message.yiaddr;
+    // A renewing Ack may leave `yiaddr` empty: the client already owns the
+    // address, which the server echoed in `ciaddr`.
+    const current = this.offer?.ip ?? this.leaseValue?.ip;
+    const ip = message.yiaddr === UNSPECIFIED ? current : message.yiaddr;
     if (ip === undefined) {
       return;
     }
@@ -833,6 +940,7 @@ export class DhcpClient {
       // client in `request`; its retry timer eventually fails it.
       return;
     }
+    const acquiredAt = this.sim.now;
     this.leaseValue = {
       ip,
       mask,
@@ -840,15 +948,23 @@ export class DhcpClient {
       dnsServers,
       serverId,
       leaseTimeSeconds,
-      acquiredAt: this.sim.now,
+      acquiredAt,
+      expiresAt:
+        leaseTimeSeconds === undefined
+          ? undefined
+          : acquiredAt + leaseTimeSeconds * MICROS_PER_SECOND,
     };
+    this.offer = undefined;
     this.cancelTimer();
     this.setState("bound");
+    this.armLeaseTimer();
   }
 
   private onNak(): void {
     this.stats.naks += 1;
-    // The offered address is gone: start a new exchange from scratch.
+    // The lease is not ours (or the offer is gone): start a new exchange from
+    // scratch. The applied configuration is left alone on purpose — a NAK is
+    // an answer, and a fresh DORA replaces the address one round trip later.
     this.start();
   }
 
@@ -890,6 +1006,192 @@ export class DhcpClient {
       ),
     );
     this.arm();
+  }
+
+  /**
+   * T1: the point where a bound client starts renewing, half the lease.
+   *
+   * Timers are derived from the lease itself (`acquiredAt`/`expiresAt`), not
+   * from a server option, which is why an Ack without `lease-time` leaves the
+   * client with no renewal at all.
+   */
+  private renewAt(lease: DhcpClientLease): number {
+    return this.ratioAt(lease, DHCP_RENEW_RATIO);
+  }
+
+  /** T2: the point where the client gives up on its server and broadcasts. */
+  private rebindAt(lease: DhcpClientLease): number {
+    return this.ratioAt(lease, DHCP_REBIND_RATIO);
+  }
+
+  private ratioAt(lease: DhcpClientLease, ratio: number): number {
+    const expiresAt = lease.expiresAt as number;
+    return lease.acquiredAt + (expiresAt - lease.acquiredAt) * ratio;
+  }
+
+  /**
+   * Next lease deadline for the current phase.
+   *
+   * While retries remain it is the next retransmission; once the budget for a
+   * phase is gone it is the phase's own deadline (T2 for renewing, the lease
+   * expiry for rebinding), so an unanswered renewal waits quietly instead of
+   * polling.
+   */
+  private leaseDeadline(lease: DhcpClientLease): number {
+    const exhausted = this.transmissions >= this.retries + 1;
+    if (this.stateValue === "bound") {
+      return this.renewAt(lease);
+    }
+    if (this.stateValue === "renew") {
+      return exhausted
+        ? this.rebindAt(lease)
+        : Math.min(this.sim.now + this.timeoutUs, this.rebindAt(lease));
+    }
+    if (this.stateValue === "rebind") {
+      return exhausted
+        ? (lease.expiresAt as number)
+        : Math.min(this.sim.now + this.timeoutUs, lease.expiresAt as number);
+    }
+    return lease.expiresAt as number;
+  }
+
+  /** Schedule the single lease timer, clamped to the lease expiry. */
+  private armLeaseTimer(): void {
+    this.cancelTimer();
+    const lease = this.leaseValue;
+    const expiresAt = lease?.expiresAt;
+    if (!this.autoRenew || lease === undefined || expiresAt === undefined) {
+      return;
+    }
+    // A zero-second lease carries no deadline: arming it would loop through
+    // expire -> discover -> Ack at the same virtual time.
+    if (expiresAt <= lease.acquiredAt) {
+      return;
+    }
+    const now = this.sim.now;
+    const at = Math.max(now, Math.min(this.leaseDeadline(lease), expiresAt));
+    this.timer = this.sim.scheduleAt(at, () => {
+      this.timer = undefined;
+      this.onLeaseTimer();
+    });
+  }
+
+  /** One lease deadline: start renewing, start rebinding, retransmit or die. */
+  private onLeaseTimer(): void {
+    const lease = this.leaseValue;
+    const expiresAt = lease?.expiresAt;
+    if (lease === undefined || expiresAt === undefined) {
+      return;
+    }
+    if (this.sim.now >= expiresAt) {
+      this.expireLease();
+      return;
+    }
+    if (this.stateValue === "bound") {
+      this.beginRenew(lease);
+      return;
+    }
+    if (this.stateValue === "renew") {
+      if (this.sim.now >= this.rebindAt(lease)) {
+        this.beginRebind(lease);
+        return;
+      }
+      if (this.transmissions >= this.retries + 1) {
+        // Unanswered renewal: wait for T2 instead of flooding the server.
+        this.armLeaseTimer();
+        return;
+      }
+      this.sendLeaseRequest(lease, "renew");
+      this.armLeaseTimer();
+      return;
+    }
+    if (this.stateValue === "rebind") {
+      if (this.transmissions >= this.retries + 1) {
+        // Nothing answered on the broadcast either: only the expiry is left.
+        this.armLeaseTimer();
+        return;
+      }
+      this.sendLeaseRequest(lease, "rebind");
+      this.armLeaseTimer();
+    }
+  }
+
+  /** Enter RENEWING: unicast to the server that granted the lease. */
+  private beginRenew(lease: DhcpClientLease): void {
+    this.setState("renew");
+    this.transmissions = 0;
+    this.xid = this.nextXid();
+    if (lease.serverId === undefined) {
+      // Without a server identifier there is nobody to unicast to, so the
+      // renewal starts as a rebind.
+      this.beginRebind(lease);
+      return;
+    }
+    this.sendLeaseRequest(lease, "renew");
+    this.armLeaseTimer();
+  }
+
+  /** Enter REBINDING: broadcast, because the renewing server went quiet. */
+  private beginRebind(lease: DhcpClientLease): void {
+    this.setState("rebind");
+    this.transmissions = 0;
+    this.xid = this.nextXid();
+    this.sendLeaseRequest(lease, "rebind");
+    this.armLeaseTimer();
+  }
+
+  /**
+   * One Request during the lease lifecycle.
+   *
+   * RFC 2131 §4.3.2: RENEWING unicasts to the server identifier with the
+   * leased address in `ciaddr` and no `requested-ip`; REBINDING sends the
+   * same message to the broadcast address because the server that granted
+   * the lease stopped answering.
+   */
+  private sendLeaseRequest(
+    lease: DhcpClientLease,
+    phase: "renew" | "rebind",
+  ): void {
+    this.stats.requests += 1;
+    this.transmissions += 1;
+    const message = bootpMessage(
+      DHCP_OP_REQUEST,
+      this.xid,
+      this.mac.toBytes(),
+      this.secondsSinceStart(),
+      [messageTypeOption(DHCP_MESSAGE_REQUEST)],
+    );
+    message.ciaddr = lease.ip;
+    if (phase === "renew" && lease.serverId !== undefined) {
+      this.transmitUnicast(lease.serverId, message);
+      return;
+    }
+    this.transmit(message);
+  }
+
+  /**
+   * The lease ran out with nothing answering.
+   *
+   * The address is no longer defensible, so the interface goes back to
+   * 0.0.0.0 before discovery restarts with a fresh transaction id. A NAK
+   * deliberately does not do this: the server answered and the next DORA is a
+   * round trip away, so the configuration stays until the new Ack replaces
+   * it.
+   */
+  private expireLease(): void {
+    this.cancelTimer();
+    this.clearIpConfig();
+    this.leaseValue = undefined;
+    this.start();
+  }
+
+  private clearIpConfig(): void {
+    try {
+      this.host.setIpConfig(this.iface, { ip: UNSPECIFIED, gateway: null });
+    } catch {
+      // A host that refuses the reset keeps the stale address; the lease is
+      // gone either way and discovery continues.
+    }
   }
 
   /** `secs` counts whole seconds since the last `start()`, from `sim.now`. */
@@ -946,6 +1248,25 @@ export class DhcpClient {
       );
     } catch {
       // A down interface must not escape the receive path.
+    }
+  }
+
+  /**
+   * Unicast one renewal through the normal UDP path.
+   *
+   * The client owns an address by now, so the socket layer can resolve the
+   * server and the exchange looks like any other UDP datagram.
+   */
+  private transmitUnicast(serverId: string, message: DhcpMessage): void {
+    this.ipId = (this.ipId % MAX_SECONDS) + 1;
+    try {
+      this.host.sendUdp(serverId, DHCP_SERVER_PORT, serializeDhcp(message), {
+        iface: this.iface,
+        srcPort: DHCP_CLIENT_PORT,
+      });
+    } catch {
+      // Unroutable (or an address the host cannot source): the retry timer
+      // covers it and T2 turns the client into a rebinding one.
     }
   }
 

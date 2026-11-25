@@ -608,3 +608,313 @@ describe("dhcp client/server (F-72/73)", () => {
     server.close();
   });
 });
+
+/**
+ * Lease lifecycle (T6, F-73 renewal): T1 renewal, T2 rebinding and expiry.
+ *
+ * T3 handed out leases for life; here the client and the server both follow
+ * the timers. Leases last seconds and `timeoutUs` is sub-second, so T1 (50%),
+ * T2 (87.5%) and the expiry deadline all land inside one `runUntil()` window
+ * at a known virtual time. `autoRenew` is opt-in because a client that renews
+ * forever never lets `Simulation.runAll()` drain.
+ */
+const LEASE_SECONDS = 2;
+const LEASE_US = LEASE_SECONDS * 1_000_000;
+const RENEW_US = LEASE_US / 2;
+const REBIND_US = (LEASE_US * 7) / 8;
+const SHORT_TIMEOUT_US = 100_000;
+
+/** Server that can expire leases: it needs the simulation clock. */
+function leaseServer(
+  rig: Rig,
+  pool: readonly string[],
+  leaseTimeSeconds: number = LEASE_SECONDS,
+): DhcpServer {
+  return new DhcpServer({
+    host: rig.serverHost,
+    sim: rig.sim,
+    pool,
+    gateway: GATEWAY,
+    dnsServers: [DNS_IP],
+    leaseTimeSeconds,
+  });
+}
+
+/** Advance the clock just far enough for a fresh client to finish DORA. */
+function bindNow(client: DhcpClient, sim: Simulation): void {
+  sim.runUntil(sim.now + 50_000);
+  expect(client.state).toBe("bound");
+}
+
+describe("dhcp lease lifecycle (T6 renewal, rebind, expiry)", () => {
+  test("renews at T1 (half the lease) without changing the address", () => {
+    const rig = directLink(45);
+    const server = leaseServer(rig, [FIRST_IP, SECOND_IP]);
+    const client = new DhcpClient({
+      host: rig.clientA,
+      sim: rig.sim,
+      autoRenew: true,
+      timeoutUs: SHORT_TIMEOUT_US,
+    });
+    client.start();
+    bindNow(client, rig.sim);
+
+    const first = client.lease;
+    expect(first?.leaseTimeSeconds).toBe(LEASE_SECONDS);
+    expect(first?.expiresAt).toBe((first?.acquiredAt as number) + LEASE_US);
+    const leasedBefore = server.getLeases()[0];
+    expect(leasedBefore?.expiresAt).toBeGreaterThan(0);
+
+    const renewAt = (first?.acquiredAt as number) + RENEW_US;
+    rig.sim.runUntil(renewAt + 20_000);
+
+    const renewed = client.lease;
+    expect(client.state).toBe("bound");
+    expect(renewed?.ip).toBe(FIRST_IP);
+    expect(rig.clientA.getIpConfig("eth0")?.ip.toString()).toBe(FIRST_IP);
+    expect(renewed?.acquiredAt).toBeGreaterThanOrEqual(renewAt);
+    expect(renewed?.expiresAt).toBe((renewed?.acquiredAt as number) + LEASE_US);
+    expect(renewed?.expiresAt).toBeGreaterThan(first?.expiresAt as number);
+    expect(client.stats).toEqual({
+      discovers: 1,
+      offers: 1,
+      requests: 2,
+      acks: 2,
+      naks: 0,
+    });
+
+    // The server extended the same lease instead of handing out a new one.
+    expect(server.stats.requests).toBe(2);
+    expect(server.stats.acks).toBe(2);
+    const leasedAfter = server.getLeases();
+    expect(leasedAfter).toHaveLength(1);
+    expect(leasedAfter[0]?.ip).toBe(FIRST_IP);
+    expect(leasedAfter[0]?.expiresAt).toBeGreaterThan(
+      leasedBefore?.expiresAt as number,
+    );
+    expect(
+      Math.abs(
+        (leasedAfter[0]?.expiresAt as number) - (renewed?.expiresAt as number),
+      ),
+    ).toBeLessThan(SHORT_TIMEOUT_US);
+
+    client.close();
+    server.close();
+  });
+
+  test("rebinds by broadcast at T2 when the renewing server stopped answering", () => {
+    const rig = directLink(46);
+    const server = leaseServer(rig, [FIRST_IP]);
+    const client = new DhcpClient({
+      host: rig.clientA,
+      sim: rig.sim,
+      autoRenew: true,
+      timeoutUs: SHORT_TIMEOUT_US,
+      retries: 1,
+    });
+    const states: string[] = [];
+    client.onStateChange = (state) => states.push(state);
+    client.start();
+    bindNow(client, rig.sim);
+    const t2 = (client.lease?.acquiredAt as number) + REBIND_US;
+
+    // The server goes away right after granting the lease, so every unicast
+    // renewal at T1 is lost.
+    server.close();
+    rig.sim.runUntil(t2 - 10_000);
+    expect(client.state).toBe("renew");
+    expect(rig.clientA.getIpConfig("eth0")?.ip.toString()).toBe(FIRST_IP);
+
+    // A server is back before T2: the broadcast rebind recovers the same
+    // address without starting a new DORA.
+    const restarted = leaseServer(rig, [FIRST_IP]);
+    rig.sim.runUntil(t2 + 50_000);
+
+    expect(states).toContain("renew");
+    expect(states).toContain("rebind");
+    expect(client.state).toBe("bound");
+    expect(client.lease?.ip).toBe(FIRST_IP);
+    expect(rig.clientA.getIpConfig("eth0")?.ip.toString()).toBe(FIRST_IP);
+    expect(client.stats.discovers).toBe(1);
+    expect(restarted.stats.acks).toBe(1);
+
+    client.close();
+    restarted.close();
+  });
+
+  test("expires without a renewal, clears the address and discovers again", () => {
+    const rig = directLink(47);
+    const server = leaseServer(rig, [FIRST_IP]);
+    const client = new DhcpClient({
+      host: rig.clientA,
+      sim: rig.sim,
+      autoRenew: true,
+      timeoutUs: SHORT_TIMEOUT_US,
+      retries: 1,
+    });
+    const seen: string[] = [];
+    client.onStateChange = (state) => {
+      const ip = rig.clientA.getIpConfig("eth0")?.ip.toString();
+      seen.push(`${state}:${ip ?? "unset"}`);
+    };
+    client.start();
+    bindNow(client, rig.sim);
+    const expiry = client.lease?.expiresAt as number;
+    server.close();
+
+    // Nothing answers the renewal nor the rebind: at the lease deadline the
+    // address is dropped and a fresh DORA begins.
+    rig.sim.runUntil(expiry + 10_000);
+
+    expect(client.state).toBe("discover");
+    expect(client.stats.discovers).toBe(2);
+    expect(rig.clientA.getIpConfig("eth0")?.ip.toString()).toBe("0.0.0.0");
+    expect(client.lease).toBeUndefined();
+    expect(seen).toContain("renew:10.0.0.100");
+    expect(seen).toContain("rebind:10.0.0.100");
+    expect(seen).toContain("discover:0.0.0.0");
+
+    client.close();
+  });
+
+  test("the server reassigns an expired address to another client", () => {
+    const rig = hubLink(48);
+    const server = leaseServer(rig, [FIRST_IP]);
+    const a = new DhcpClient({ host: rig.clientA, sim: rig.sim });
+    a.start();
+    bindNow(a, rig.sim);
+    expect(rig.clientA.getIpConfig("eth0")?.ip.toString()).toBe(FIRST_IP);
+    const expiry = a.lease?.expiresAt as number;
+
+    rig.sim.runUntil(expiry + 1_000);
+    expect(server.getLeases()).toHaveLength(0);
+
+    const b = new DhcpClient({ host: rig.clientB, sim: rig.sim });
+    b.start();
+    rig.sim.runUntil(rig.sim.now + 50_000);
+
+    expect(b.state).toBe("bound");
+    expect(rig.clientB.getIpConfig("eth0")?.ip.toString()).toBe(FIRST_IP);
+    expect(server.getLeases()).toEqual([
+      expect.objectContaining({
+        mac: CLIENT_B_MAC,
+        ip: FIRST_IP,
+        state: "bound",
+      }),
+    ]);
+    expect(server.stats.acks).toBe(2);
+
+    // The stale client still believes it owns FIRST_IP: its renewal carries
+    // the address in `ciaddr` and no `requested-ip`, and the server NAKs it
+    // because that address now has a lease with another hardware address.
+    const stale: DhcpMessage[] = [];
+    rig.clientA.onPayload = (_iface, _etherType, payload) => {
+      const reply = dhcpFrom(payload, DHCP_CLIENT_PORT);
+      if (reply !== undefined) {
+        stale.push(reply);
+      }
+    };
+    sendBroadcast(
+      rig.clientA,
+      dhcpMessage({
+        xid: 0x5a5a,
+        ciaddr: FIRST_IP,
+        chaddr: chaddrOf(CLIENT_A_MAC),
+        options: [{ kind: "message-type", type: DHCP_MESSAGE_REQUEST }],
+      }),
+    );
+    rig.sim.runUntil(rig.sim.now + 50_000);
+
+    expect(server.stats.naks).toBe(1);
+    expect(stale).toHaveLength(1);
+    expect(dhcpMessageType(stale[0]?.options ?? [])).toBe(DHCP_MESSAGE_NAK);
+
+    a.close();
+    b.close();
+    server.close();
+  });
+
+  test("a NAK during rebind keeps the address configured but rediscovers", () => {
+    const rig = directLink(49);
+    let phase: "initial" | "rebind" | "recovered" = "initial";
+    const ack = (request: DhcpMessage): void => {
+      sendReply(rig.serverHost, request, {
+        yiaddr: FIRST_IP,
+        options: [
+          { kind: "message-type", type: DHCP_MESSAGE_ACK },
+          { kind: "server-id", id: SERVER_IP },
+          { kind: "subnet-mask", mask: MASK_24 },
+          { kind: "router", routers: [GATEWAY] },
+          { kind: "dns", servers: [DNS_IP] },
+          { kind: "lease-time", seconds: LEASE_SECONDS },
+        ],
+      });
+    };
+    rig.serverHost.onPayload = (_iface, _etherType, payload) => {
+      const request = dhcpFrom(payload, DHCP_SERVER_PORT);
+      if (request === undefined) {
+        return;
+      }
+      const type = dhcpMessageType(request.options);
+      if (type === DHCP_MESSAGE_DISCOVER) {
+        sendReply(rig.serverHost, request, {
+          yiaddr: FIRST_IP,
+          options: [
+            { kind: "message-type", type: DHCP_MESSAGE_OFFER },
+            { kind: "server-id", id: SERVER_IP },
+            { kind: "lease-time", seconds: LEASE_SECONDS },
+          ],
+        });
+        return;
+      }
+      if (type !== DHCP_MESSAGE_REQUEST) {
+        return;
+      }
+      if (phase === "initial") {
+        phase = "rebind";
+        ack(request);
+        return;
+      }
+      if (phase === "rebind") {
+        phase = "recovered";
+        sendReply(rig.serverHost, request, {
+          options: [
+            { kind: "message-type", type: DHCP_MESSAGE_NAK },
+            { kind: "server-id", id: SERVER_IP },
+          ],
+        });
+        return;
+      }
+      ack(request);
+    };
+
+    const client = new DhcpClient({
+      host: rig.clientA,
+      sim: rig.sim,
+      autoRenew: true,
+      timeoutUs: SHORT_TIMEOUT_US,
+      retries: 0,
+    });
+    const seen: string[] = [];
+    client.onStateChange = (state) => {
+      const ip = rig.clientA.getIpConfig("eth0")?.ip.toString();
+      seen.push(`${state}:${ip ?? "unset"}`);
+    };
+    client.start();
+    bindNow(client, rig.sim);
+    const t2 = (client.lease?.acquiredAt as number) + REBIND_US;
+
+    rig.sim.runUntil(t2 + 50_000);
+
+    expect(client.stats.naks).toBe(1);
+    expect(client.stats.discovers).toBe(2);
+    expect(client.state).toBe("bound");
+    expect(client.lease?.ip).toBe(FIRST_IP);
+    expect(rig.clientA.getIpConfig("eth0")?.ip.toString()).toBe(FIRST_IP);
+    // A NAK is an answer, not a dead lease: the configuration stays until the
+    // new DORA replaces it. Only an expiry zeroes the address.
+    expect(seen).toContain("discover:10.0.0.100");
+
+    client.close();
+  });
+});

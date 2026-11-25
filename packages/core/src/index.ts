@@ -17,6 +17,8 @@ export {
   DEFAULT_DHCP_LEASE_TIME_SECONDS,
   DEFAULT_DHCP_RETRIES,
   DEFAULT_DHCP_TIMEOUT_US,
+  DHCP_REBIND_RATIO,
+  DHCP_RENEW_RATIO,
   DhcpClient,
   type DhcpClientLease,
   type DhcpClientOptions,
