@@ -825,13 +825,14 @@ export function buildTemplate(id: TemplateId): Topology {
   }
 }
 
-export type DeviceKind = "host" | "switch" | "router" | "hub";
+export type DeviceKind = "host" | "switch" | "router" | "hub" | "server";
 
 export const DEVICE_KINDS: ReadonlyArray<DeviceKind> = [
   "host",
   "switch",
   "router",
   "hub",
+  "server",
 ];
 
 export const DEVICE_GLYPH: Record<DeviceKind, string> = {
@@ -839,6 +840,7 @@ export const DEVICE_GLYPH: Record<DeviceKind, string> = {
   switch: "▤",
   router: "⬡",
   hub: "⊹",
+  server: "▦",
 };
 
 export interface TopologyVlan {
@@ -922,6 +924,7 @@ const NAME_PREFIX: Record<DeviceKind, string> = {
   switch: "sw",
   router: "r",
   hub: "hub",
+  server: "srv",
 };
 
 const IPV4_OCTET = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
@@ -975,6 +978,7 @@ function nextNodeName(kind: DeviceKind, nodes: Array<TopologyNode>): string {
 function defaultInterfaceNames(kind: DeviceKind): Array<string> {
   switch (kind) {
     case "host":
+    case "server":
       return ["eth0"];
     case "router":
       return ["p0", "p1"];
@@ -1002,9 +1006,10 @@ function createInterface(
 }
 
 function nextInterfaceName(node: TopologyNode): string {
-  const prefix = node.kind === "host" ? "eth" : "p";
+  const hostLike = node.kind === "host" || node.kind === "server";
+  const prefix = hostLike ? "eth" : "p";
   const names = new Set(node.interfaces.map((iface) => iface.name));
-  for (let index = node.kind === "host" ? 0 : 1; index < 1000; index += 1) {
+  for (let index = hostLike ? 0 : 1; index < 1000; index += 1) {
     const candidate = `${prefix}${index}`;
     if (!names.has(candidate)) {
       return candidate;
@@ -1115,10 +1120,15 @@ export function canConnect(
       reason: `${endpointLabel(b)} ya está conectada por ${linkB.id}`,
     };
   }
-  if (nodeA.kind === "host" && nodeB.kind === "host") {
+  // Hosts and servers are L2 endpoints: they cable to switch, router or hub
+  // ports, never to each other.
+  const endpointA = nodeA.kind === "host" || nodeA.kind === "server";
+  const endpointB = nodeB.kind === "host" || nodeB.kind === "server";
+  if (endpointA && endpointB) {
     return {
       ok: false,
-      reason: "un host se conecta a un puerto de switch, router o hub",
+      reason:
+        "un host o servidor se conecta a un puerto de switch, router o hub",
     };
   }
   return { ok: true };
@@ -1667,7 +1677,10 @@ function nodeToScenario(node: TopologyNode, path: string): ScenarioNode {
     throw fail(path, `${node.name} necesita al menos una interfaz`);
   }
   assertUniqueInterfaceNames(node, path);
-  if (node.kind === "host") {
+  // v1 has no server type: a server exports as a host (same L2/L3 behavior,
+  // no services yet). Importing restores it as a host; the kind does not
+  // round-trip until the schema grows a server type.
+  if (node.kind === "host" || node.kind === "server") {
     const out: ScenarioNode = {
       type: "host",
       id: node.name,

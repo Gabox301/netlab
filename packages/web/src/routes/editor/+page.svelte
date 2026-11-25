@@ -355,7 +355,7 @@ function selectedLinkOf(): TopologyLink | null {
 }
 
 function nodeSubtitle(node: TopologyNode): string {
-  if (node.kind === "host") {
+  if (node.kind === "host" || node.kind === "server") {
     const iface = node.interfaces[0];
     if (iface === undefined || iface.ip === "") {
       return "sin IP";
@@ -1725,7 +1725,7 @@ function exportJson(): void {
                 </label>
               </div>
 
-              {#if node.kind === "host"}
+              {#if node.kind === "host" || node.kind === "server"}
                 <div class="grid2">
                   <label class="fld">
                     <span>IP</span>
