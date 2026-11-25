@@ -9,6 +9,7 @@ import {
   addRoute,
   alignNodes,
   applyLinkPreset,
+  buildTemplate,
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
   canConnect,
@@ -38,6 +39,9 @@ import {
   removeRoute,
   renameInterface,
   renameNode,
+  TEMPLATE_IDS,
+  TEMPLATES,
+  type TemplateId,
   type Topology,
   type TopologyEndpoint,
   type TopologyHistory,
@@ -416,6 +420,18 @@ function loadExample(): void {
     exampleTopology(),
     "Ejemplo cargado: h1 → r1 → h2/h3 con ping h1 → h3. Exportá y corré netlab run.",
   );
+}
+
+function loadTemplate(id: TemplateId): void {
+  try {
+    const built = buildTemplate(id);
+    loadTopology(
+      built,
+      `Plantilla ${TEMPLATES[id].label} cargada: ${TEMPLATES[id].description}`,
+    );
+  } catch (error) {
+    setNotice("error", messageOf(error));
+  }
 }
 
 function placeNode(kind: DeviceKind, x: number, y: number): void {
@@ -2137,6 +2153,21 @@ function exportJson(): void {
             Nada seleccionado. El export llama a
             <span class="mono">parseScenarioJson</span> antes de descargar.
           </p>
+          <div class="sec">
+            <h3>Plantillas</h3>
+            <span class="row">
+              {#each TEMPLATE_IDS as templateId (templateId)}
+                <button
+                  type="button"
+                  class="mini"
+                  title={TEMPLATES[templateId].description}
+                  onclick={() => loadTemplate(templateId)}
+                >
+                  {TEMPLATES[templateId].label}
+                </button>
+              {/each}
+            </span>
+          </div>
           <div class="grid2">
             <label class="fld">
               <span>seed</span>
@@ -2260,7 +2291,8 @@ function exportJson(): void {
         <h2>Lienzo vacío</h2>
         <p>
           Arrastrá un dispositivo desde la barra izquierda o cargá el ejemplo
-          para ver el flujo dibujar → exportar → netlab run.
+          para ver el flujo dibujar → exportar → netlab run. O elegí una plantilla
+          en el panel Escenario.
         </p>
         <div class="row center">
           <button type="button" onclick={loadExample}>Cargar ejemplo</button>

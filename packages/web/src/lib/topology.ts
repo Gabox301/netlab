@@ -428,6 +428,403 @@ export function alignNodes(
   };
 }
 
+/* ------------------------------------------------------------------------- */
+/* Templates (F-86): starter topologies for the editor canvas.               */
+/* ------------------------------------------------------------------------- */
+
+export type TemplateId =
+  | "lan-simple"
+  | "dos-subredes"
+  | "vlan-aislamiento"
+  | "dmz";
+
+export interface TemplateInfo {
+  id: TemplateId;
+  label: string;
+  description: string;
+}
+
+export const TEMPLATE_IDS: ReadonlyArray<TemplateId> = [
+  "lan-simple",
+  "dos-subredes",
+  "vlan-aislamiento",
+  "dmz",
+];
+
+export const TEMPLATES: Record<TemplateId, TemplateInfo> = {
+  "lan-simple": {
+    id: "lan-simple",
+    label: "LAN simple",
+    description: "Dos hosts y un switch con intercambio de tramas.",
+  },
+  "dos-subredes": {
+    id: "dos-subredes",
+    label: "Dos subredes con router",
+    description: "h1 → r1 → h2 con traceroute y ping.",
+  },
+  "vlan-aislamiento": {
+    id: "vlan-aislamiento",
+    label: "Red con VLANs",
+    description: "Dos switches con access 10/20, trunk y aislamiento.",
+  },
+  dmz: {
+    id: "dmz",
+    label: "Red con DMZ",
+    description: "WAN, DMZ y LAN tras un router de tres puertos.",
+  },
+};
+
+function templateHost(
+  name: string,
+  x: number,
+  y: number,
+  mac: string,
+  ip: string,
+  mask: string,
+  gateway: string,
+  hostOpts: TopologyNode["hostOpts"] = null,
+): TopologyNode {
+  return {
+    name,
+    kind: "host",
+    x,
+    y,
+    interfaces: [
+      {
+        name: "eth0",
+        mac,
+        ip,
+        mask,
+        prefixLength: "",
+        gateway,
+        mtu: "",
+        vlan: null,
+      },
+    ],
+    routes: [],
+    hostOpts,
+    agingTimeUs: "",
+  };
+}
+
+function templateSwitch(
+  name: string,
+  x: number,
+  y: number,
+  ports: Array<{ name: string; mac: string; vlan: TopologyVlan | null }>,
+): TopologyNode {
+  return {
+    name,
+    kind: "switch",
+    x,
+    y,
+    interfaces: ports.map((port) => ({
+      name: port.name,
+      mac: port.mac,
+      ip: "",
+      mask: "",
+      prefixLength: "",
+      gateway: "",
+      mtu: "",
+      vlan: port.vlan === null ? null : { ...port.vlan },
+    })),
+    routes: [],
+    hostOpts: null,
+    agingTimeUs: "",
+  };
+}
+
+function templateRouter(
+  name: string,
+  x: number,
+  y: number,
+  ports: Array<{ name: string; mac: string; ip: string }>,
+): TopologyNode {
+  return {
+    name,
+    kind: "router",
+    x,
+    y,
+    interfaces: ports.map((port) => ({
+      name: port.name,
+      mac: port.mac,
+      ip: port.ip,
+      mask: "",
+      prefixLength: "24",
+      gateway: "",
+      mtu: "",
+      vlan: null,
+    })),
+    routes: [],
+    hostOpts: null,
+    agingTimeUs: "",
+  };
+}
+
+function templateLink(
+  id: string,
+  aNode: string,
+  aIface: string,
+  bNode: string,
+  bIface: string,
+): TopologyLink {
+  return {
+    id,
+    a: { node: aNode, iface: aIface },
+    b: { node: bNode, iface: bIface },
+    params: { latencyUs: DEFAULT_LATENCY_US },
+  };
+}
+
+/** Runnable demo: two hosts on a switch exchanging raw frames. */
+function lanSimpleTopology(): Topology {
+  return {
+    seed: 7,
+    until: "2ms",
+    nodes: [
+      templateHost("h1", 120, 200, "02:00:00:00:00:0a", "10.0.0.1", "", ""),
+      templateHost("h2", 370, 200, "02:00:00:00:00:0b", "10.0.0.2", "", ""),
+      templateSwitch("sw1", 620, 200, [
+        { name: "p1", mac: "02:00:00:00:00:01", vlan: null },
+        { name: "p2", mac: "02:00:00:00:00:02", vlan: null },
+      ]),
+    ],
+    links: [
+      templateLink("l1", "h1", "eth0", "sw1", "p1"),
+      templateLink("l2", "h2", "eth0", "sw1", "p2"),
+    ],
+    actions: [
+      {
+        at: 0,
+        host: "h1",
+        iface: "eth0",
+        destIp: "10.0.0.2",
+        etherType: "0x0800",
+        payload: "hola desde h1",
+      },
+      {
+        at: "500us",
+        host: "h2",
+        iface: "eth0",
+        destIp: "10.0.0.1",
+        etherType: "0x0800",
+        payload: "hola desde h2",
+      },
+    ],
+  };
+}
+
+/** Runnable demo: h1 and h2 behind r1's two ports, with traceroute and ping. */
+function dosSubredesTopology(): Topology {
+  return {
+    seed: 11,
+    until: "5s",
+    nodes: [
+      templateHost(
+        "h1",
+        120,
+        200,
+        "02:00:00:00:00:0a",
+        "10.0.0.2",
+        "255.255.255.0",
+        "10.0.0.1",
+      ),
+      templateRouter("r1", 370, 200, [
+        { name: "p0", mac: "02:00:00:00:00:01", ip: "10.0.0.1" },
+        { name: "p1", mac: "02:00:00:00:00:02", ip: "10.0.1.1" },
+      ]),
+      templateHost(
+        "h2",
+        620,
+        200,
+        "02:00:00:00:00:0b",
+        "10.0.1.2",
+        "255.255.255.0",
+        "10.0.1.1",
+      ),
+    ],
+    links: [
+      templateLink("l1", "h1", "eth0", "r1", "p0"),
+      templateLink("l2", "h2", "eth0", "r1", "p1"),
+    ],
+    actions: [
+      { at: 0, host: "h1", exec: "traceroute 10.0.1.2" },
+      {
+        at: "5ms",
+        host: "h1",
+        destIp: "10.0.1.2",
+        ping: { count: 2, size: 32, interval: "1ms" },
+      },
+    ],
+  };
+}
+
+/** Runnable demo: two switches with access 10/20, a trunk, and isolation. */
+function vlanAislamientoTopology(): Topology {
+  const access = (vlan: string): TopologyVlan => ({
+    mode: "access",
+    vlan,
+    allowed: "",
+    native: "",
+  });
+  const trunk: TopologyVlan = {
+    mode: "trunk",
+    vlan: "1",
+    allowed: "10,20",
+    native: "",
+  };
+  const fastArp: TopologyNode["hostOpts"] = {
+    arpTimeoutUs: 200000,
+    arpRetries: 1,
+  };
+  return {
+    seed: 5,
+    until: "2s",
+    nodes: [
+      templateHost(
+        "h1",
+        120,
+        200,
+        "02:00:00:00:00:0a",
+        "10.0.0.2",
+        "255.255.255.0",
+        "",
+        fastArp,
+      ),
+      templateSwitch("sw1", 370, 200, [
+        { name: "p1", mac: "02:00:00:00:00:01", vlan: access("10") },
+        { name: "p2", mac: "02:00:00:00:00:02", vlan: access("20") },
+        { name: "p3", mac: "02:00:00:00:00:03", vlan: trunk },
+      ]),
+      templateSwitch("sw2", 620, 200, [
+        { name: "p1", mac: "02:00:00:00:00:04", vlan: trunk },
+        { name: "p2", mac: "02:00:00:00:00:05", vlan: access("10") },
+      ]),
+      templateHost(
+        "h2",
+        870,
+        200,
+        "02:00:00:00:00:0b",
+        "10.0.0.3",
+        "255.255.255.0",
+        "",
+        fastArp,
+      ),
+      templateHost(
+        "h3",
+        1120,
+        200,
+        "02:00:00:00:00:0c",
+        "10.0.0.4",
+        "255.255.255.0",
+        "",
+      ),
+    ],
+    links: [
+      templateLink("l1", "h1", "eth0", "sw1", "p1"),
+      templateLink("l2", "h2", "eth0", "sw1", "p2"),
+      templateLink("l3", "sw1", "p3", "sw2", "p1"),
+      templateLink("l4", "h3", "eth0", "sw2", "p2"),
+    ],
+    actions: [
+      {
+        at: 0,
+        host: "h1",
+        destIp: "10.0.0.4",
+        ping: { count: 1, size: 8, interval: "1ms" },
+      },
+      {
+        at: "1s",
+        host: "h1",
+        destIp: "10.0.0.3",
+        ping: { count: 1, size: 8, interval: "1ms" },
+      },
+    ],
+  };
+}
+
+/**
+ * Runnable demo: WAN, DMZ and LAN behind a three-port router. h1 lives on
+ * the WAN side, h2 is the DMZ server and h3 the LAN host; the router joins
+ * the three connected subnets, so the pings cross zones through it.
+ */
+function dmzTopology(): Topology {
+  return {
+    seed: 7,
+    until: "5s",
+    nodes: [
+      templateHost(
+        "h1",
+        120,
+        360,
+        "02:00:00:00:00:0a",
+        "203.0.113.2",
+        "255.255.255.0",
+        "203.0.113.1",
+      ),
+      templateRouter("r1", 480, 360, [
+        { name: "p0", mac: "02:00:00:00:00:01", ip: "203.0.113.1" },
+        { name: "p1", mac: "02:00:00:00:00:02", ip: "10.0.2.1" },
+        { name: "p2", mac: "02:00:00:00:00:03", ip: "10.0.1.1" },
+      ]),
+      templateHost(
+        "h2",
+        840,
+        200,
+        "02:00:00:00:00:0b",
+        "10.0.2.2",
+        "255.255.255.0",
+        "10.0.2.1",
+      ),
+      templateHost(
+        "h3",
+        840,
+        520,
+        "02:00:00:00:00:0c",
+        "10.0.1.2",
+        "255.255.255.0",
+        "10.0.1.1",
+      ),
+    ],
+    links: [
+      templateLink("l1", "h1", "eth0", "r1", "p0"),
+      templateLink("l2", "h2", "eth0", "r1", "p1"),
+      templateLink("l3", "h3", "eth0", "r1", "p2"),
+    ],
+    actions: [
+      { at: 0, host: "h1", exec: "traceroute 10.0.1.2" },
+      {
+        at: "5ms",
+        host: "h1",
+        destIp: "10.0.1.2",
+        ping: { count: 2, size: 32, interval: "1ms" },
+      },
+      {
+        at: "1s",
+        host: "h3",
+        destIp: "10.0.2.2",
+        ping: { count: 1, size: 32, interval: "1ms" },
+      },
+    ],
+  };
+}
+
+/** Build a starter topology by id. Throws on unknown ids. */
+export function buildTemplate(id: TemplateId): Topology {
+  switch (id) {
+    case "lan-simple":
+      return lanSimpleTopology();
+    case "dos-subredes":
+      return dosSubredesTopology();
+    case "vlan-aislamiento":
+      return vlanAislamientoTopology();
+    case "dmz":
+      return dmzTopology();
+    default:
+      throw new Error(`plantilla desconocida "${id}"`);
+  }
+}
+
 export type DeviceKind = "host" | "switch" | "router" | "hub";
 
 export const DEVICE_KINDS: ReadonlyArray<DeviceKind> = [
