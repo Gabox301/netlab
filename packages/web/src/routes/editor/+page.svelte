@@ -5,6 +5,7 @@ import {
   addLink,
   addNode,
   addRoute,
+  applyLinkPreset,
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
   canConnect,
@@ -16,6 +17,9 @@ import {
   interfaceAnchor,
   interfaceLink,
   kindLabel,
+  LINK_PRESET_IDS,
+  LINK_PRESETS,
+  type LinkPresetId,
   NODE_HEIGHT,
   NODE_WIDTH,
   removeInterface,
@@ -659,6 +663,141 @@ function onLatencyChange(link: TopologyLink, event: Event): void {
   link.params.latencyUs = value;
 }
 
+function onApplyPreset(link: TopologyLink, preset: LinkPresetId): void {
+  try {
+    topology = applyLinkPreset(topology, link.id, preset);
+    selection = { kind: "link", id: link.id };
+    setNotice(
+      "ok",
+      `Cable ${link.id}: preset ${LINK_PRESETS[preset].label} aplicado.`,
+    );
+  } catch (error) {
+    setNotice("error", messageOf(error));
+  }
+}
+
+function onJitterChange(link: TopologyLink, event: Event): void {
+  const input = event.currentTarget as HTMLInputElement;
+  const text = input.value.trim();
+  if (text === "") {
+    link.params.jitterUs = undefined;
+    return;
+  }
+  const value = Number(text);
+  if (!Number.isFinite(value) || value < 0) {
+    input.value =
+      link.params.jitterUs === undefined ? "" : String(link.params.jitterUs);
+    setNotice("error", "El jitter debe ser ≥ 0 (µs), o vacío.");
+    return;
+  }
+  link.params.jitterUs = value;
+}
+
+function onRateChange(
+  link: TopologyLink,
+  field: "lossRate" | "reorderRate" | "duplicateRate" | "corruptRate",
+  event: Event,
+): void {
+  const input = event.currentTarget as HTMLInputElement;
+  const text = input.value.trim();
+  if (text === "") {
+    link.params[field] = undefined;
+    return;
+  }
+  const value = Number(text);
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    input.value =
+      link.params[field] === undefined ? "" : String(link.params[field]);
+    setNotice("error", `${field} debe estar entre 0 y 1, o vacío.`);
+    return;
+  }
+  link.params[field] = value;
+}
+
+function onBandwidthChange(link: TopologyLink, event: Event): void {
+  const input = event.currentTarget as HTMLInputElement;
+  const text = input.value.trim();
+  if (text === "") {
+    link.params.bandwidthBps = undefined;
+    return;
+  }
+  const value = Number(text);
+  if (!Number.isFinite(value) || value <= 0) {
+    input.value =
+      link.params.bandwidthBps === undefined
+        ? ""
+        : String(link.params.bandwidthBps);
+    setNotice("error", "El ancho de banda debe ser > 0 (bps), o vacío.");
+    return;
+  }
+  link.params.bandwidthBps = value;
+}
+
+function onMtuChange(link: TopologyLink, event: Event): void {
+  const input = event.currentTarget as HTMLInputElement;
+  const text = input.value.trim();
+  if (text === "") {
+    link.params.mtuBytes = undefined;
+    return;
+  }
+  const value = Number(text);
+  if (!Number.isInteger(value) || value <= 0) {
+    input.value =
+      link.params.mtuBytes === undefined ? "" : String(link.params.mtuBytes);
+    setNotice("error", "La MTU debe ser un entero > 0 (bytes), o vacío.");
+    return;
+  }
+  link.params.mtuBytes = value;
+}
+
+function onQueueLimitChange(link: TopologyLink, event: Event): void {
+  const input = event.currentTarget as HTMLInputElement;
+  const text = input.value.trim();
+  if (text === "") {
+    link.params.queueLimit = undefined;
+    return;
+  }
+  const value = Number(text);
+  if (!Number.isInteger(value) || value <= 0) {
+    input.value =
+      link.params.queueLimit === undefined
+        ? ""
+        : String(link.params.queueLimit);
+    setNotice("error", "El límite de cola debe ser un entero > 0, o vacío.");
+    return;
+  }
+  link.params.queueLimit = value;
+}
+
+function onAddBurst(link: TopologyLink): void {
+  link.params.burst = { pGoodToBad: 0.02, pBadToGood: 0.4 };
+  link.params.lossRate = undefined;
+  setNotice("info", `Cable ${link.id}: ráfagas activas (reemplazan pérdida).`);
+}
+
+function onClearBurst(link: TopologyLink): void {
+  link.params.burst = undefined;
+}
+
+function onBurstField(
+  link: TopologyLink,
+  field: "pGoodToBad" | "pBadToGood",
+  event: Event,
+): void {
+  const burst = link.params.burst;
+  if (burst === undefined) {
+    return;
+  }
+  const input = event.currentTarget as HTMLInputElement;
+  const value = Number(input.value);
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    input.value = String(burst[field]);
+    setNotice("error", `${field} debe estar entre 0 y 1.`);
+    return;
+  }
+  burst[field] = value;
+}
+
 function onSeedChange(event: Event): void {
   const input = event.currentTarget as HTMLInputElement;
   const value = Number.parseInt(input.value, 10);
@@ -1281,20 +1420,188 @@ function exportJson(): void {
           <p class="mono pair">
             {link.a.node}:{link.a.iface} ↔ {link.b.node}:{link.b.iface}
           </p>
-          <label class="fld">
-            <span>latencia (µs)</span>
-            <input
-              class="mono"
-              type="number"
-              min="0"
-              step="1"
-              value={link.params.latencyUs}
-              onchange={(event) => onLatencyChange(link, event)}
-            />
-          </label>
+          <div class="sec">
+            <h3>Preset</h3>
+            <span class="row">
+              {#each LINK_PRESET_IDS as presetId (presetId)}
+                <button
+                  type="button"
+                  class="mini"
+                  title={LINK_PRESETS[presetId].hint}
+                  onclick={() => onApplyPreset(link, presetId)}
+                >
+                  {LINK_PRESETS[presetId].label}
+                </button>
+              {/each}
+            </span>
+          </div>
+          <div class="grid2">
+            <label class="fld">
+              <span>latencia (µs)</span>
+              <input
+                class="mono"
+                type="number"
+                min="0"
+                step="1"
+                value={link.params.latencyUs}
+                onchange={(event) => onLatencyChange(link, event)}
+              />
+            </label>
+            <label class="fld">
+              <span>jitter (µs)</span>
+              <input
+                class="mono"
+                type="number"
+                min="0"
+                step="1"
+                placeholder="0"
+                value={link.params.jitterUs ?? ""}
+                onchange={(event) => onJitterChange(link, event)}
+              />
+            </label>
+            <label class="fld">
+              <span>pérdida (0–1)</span>
+              <input
+                class="mono"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                placeholder="0"
+                disabled={link.params.burst !== undefined}
+                title={link.params.burst !== undefined ? "Las ráfagas reemplazan la pérdida" : ""}
+                value={link.params.lossRate ?? ""}
+                onchange={(event) => onRateChange(link, "lossRate", event)}
+              />
+            </label>
+            <label class="fld">
+              <span>reorden (0–1)</span>
+              <input
+                class="mono"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                placeholder="0"
+                value={link.params.reorderRate ?? ""}
+                onchange={(event) => onRateChange(link, "reorderRate", event)}
+              />
+            </label>
+            <label class="fld">
+              <span>duplicado (0–1)</span>
+              <input
+                class="mono"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                placeholder="0"
+                value={link.params.duplicateRate ?? ""}
+                onchange={(event) => onRateChange(link, "duplicateRate", event)}
+              />
+            </label>
+            <label class="fld">
+              <span>corrupción (0–1)</span>
+              <input
+                class="mono"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                placeholder="0"
+                value={link.params.corruptRate ?? ""}
+                onchange={(event) => onRateChange(link, "corruptRate", event)}
+              />
+            </label>
+            <label class="fld">
+              <span>ancho de banda (bps)</span>
+              <input
+                class="mono"
+                type="number"
+                min="1"
+                step="1000"
+                placeholder="ilimitado"
+                value={link.params.bandwidthBps ?? ""}
+                onchange={(event) => onBandwidthChange(link, event)}
+              />
+            </label>
+            <label class="fld">
+              <span>MTU (bytes)</span>
+              <input
+                class="mono"
+                type="number"
+                min="1"
+                step="1"
+                placeholder="sin límite"
+                value={link.params.mtuBytes ?? ""}
+                onchange={(event) => onMtuChange(link, event)}
+              />
+            </label>
+            <label class="fld">
+              <span>límite de cola</span>
+              <input
+                class="mono"
+                type="number"
+                min="1"
+                step="1"
+                placeholder="ilimitada"
+                value={link.params.queueLimit ?? ""}
+                onchange={(event) => onQueueLimitChange(link, event)}
+              />
+            </label>
+          </div>
+          {#if link.params.burst}
+            <div class="sec">
+              <h3>Ráfagas · reemplazan la pérdida</h3>
+              <div class="grid2">
+                <label class="fld">
+                  <span>pGoodToBad (0–1)</span>
+                  <input
+                    class="mono"
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={link.params.burst.pGoodToBad}
+                    onchange={(event) => onBurstField(link, "pGoodToBad", event)}
+                  />
+                </label>
+                <label class="fld">
+                  <span>pBadToGood (0–1)</span>
+                  <input
+                    class="mono"
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={link.params.burst.pBadToGood}
+                    onchange={(event) => onBurstField(link, "pBadToGood", event)}
+                  />
+                </label>
+              </div>
+              <button
+                type="button"
+                class="mini danger-ghost"
+                onclick={() => onClearBurst(link)}
+              >
+                Quitar ráfagas
+              </button>
+            </div>
+          {:else}
+            <span class="row">
+              <button
+                type="button"
+                class="mini"
+                onclick={() => onAddBurst(link)}
+              >
+                + ráfagas
+              </button>
+            </span>
+          {/if}
           <p class="hint">
-            El export emite <span class="mono">params.latencyUs</span>. Otros
-            impairments de un JSON importado se conservan tal cual.
+            El export valida rangos (tasas 0–1, enteros positivos) y emite
+            <span class="mono">params</span> completos. Nombres core:
+            <span class="mono">burst</span>, <span class="mono">mtuBytes</span>.
           </p>
           <button
             type="button"
