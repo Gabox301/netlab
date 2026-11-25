@@ -10,7 +10,7 @@ Slice vertical ODD sobre netlab-roadmap.md § Fase 7. Sin atajos: capturas que `
 ## Tasks
 
 - [x] T1 (S1) Export PCAP clásico + `netlab pcap` + validación tshark (F-120).
-- [ ] T2 (S1) PCAPNG + captura por interfaz + import PCAP (F-121 a F-123). Commit.
+- [x] T2 (S1) PCAPNG + captura por interfaz + import PCAP (F-121 a F-123).
 - [ ] T3 (S1) Snapshots + scrub atrás + breakpoints (F-98, F-99). Commit.
 - [ ] T4 (S1) Export de escenarios y diagramas (F-124, F-125). Commit.
 - [ ] T5 (S1) Binario único con UI embebida + verificación de arranque (S2). Commit.

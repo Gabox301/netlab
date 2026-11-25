@@ -1,27 +1,30 @@
 #!/usr/bin/env bun
 /**
  * `netlab` entrypoint: `run` executes a scenario, `validate` judges a
- * solution against an exercise and `pcap` exports a scenario's wire traffic.
+ * solution against an exercise, `pcap` exports a scenario's wire traffic and
+ * `pcap-import` reads a capture back.
  *
  * Usage: netlab run <scenario.json> [--seed N] [--until 10s] [--format human|json]
  *        netlab validate <exercise.json> <solution.json> [--format human|json]
- *        netlab pcap <scenario.json> -o <out.pcap> [--until 10s] [--format human|json]
+ *        netlab pcap <scenario.json> -o <out.pcap> [--until 10s] [--format human|json|pcap|pcapng] [--link <id>]...
+ *        netlab pcap-import <capture.pcap|capture.pcapng> [--format human|json]
  * Exit codes: 0 ok · 1 scenario/runtime error or failed check · 2 usage or
  * parse error.
  */
 
 import { readFile } from "node:fs/promises";
 import { formatHuman, formatJsonLines, formatSummaryJson } from "./format";
-import { PCAP_USAGE, runPcap } from "./pcap";
+import { PCAP_IMPORT_USAGE, PCAP_USAGE, runPcap, runPcapImport } from "./pcap";
 import { runScenario } from "./run";
 import { parseDurationToUs, parseScenarioText } from "./scenario";
 import { runValidate, VALIDATE_USAGE } from "./validate";
 
 const COMMANDS =
   "Usage: netlab <command> [options]\n" +
-  "  run       run a v1 scenario and print its traces\n" +
-  "  validate  check a solution scenario against an exercise\n" +
-  "  pcap      export a scenario's wire traffic as a classic PCAP file\n";
+  "  run          run a v1 scenario and print its traces\n" +
+  "  validate     check a solution scenario against an exercise\n" +
+  "  pcap         export a scenario's wire traffic as a pcap or pcapng file\n" +
+  "  pcap-import  parse a pcap or pcapng capture and describe its packets\n";
 
 const USAGE =
   COMMANDS +
@@ -32,7 +35,9 @@ const USAGE =
   "\n" +
   VALIDATE_USAGE +
   "\n" +
-  PCAP_USAGE;
+  PCAP_USAGE +
+  "\n" +
+  PCAP_IMPORT_USAGE;
 
 interface CliArgs {
   file: string;
@@ -53,7 +58,7 @@ function parseArgs(argv: Array<string>): CliArgs {
   }
   if (argv[0] !== "run") {
     throw usageError(
-      `unknown command ${JSON.stringify(argv[0])} (expected "run", "validate" or "pcap")`,
+      `unknown command ${JSON.stringify(argv[0])} (expected "run", "validate", "pcap" or "pcap-import")`,
     );
   }
   const rest = argv.slice(1);
@@ -105,6 +110,9 @@ async function main(argv: Array<string>): Promise<number> {
   }
   if (argv[0] === "pcap") {
     return runPcap(argv.slice(1));
+  }
+  if (argv[0] === "pcap-import") {
+    return runPcapImport(argv.slice(1));
   }
   let args: CliArgs;
   try {
