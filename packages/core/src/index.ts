@@ -14,6 +14,21 @@ export {
   NetworkInterface,
 } from "./devices";
 export {
+  DEFAULT_DHCP_LEASE_TIME_SECONDS,
+  DEFAULT_DHCP_RETRIES,
+  DEFAULT_DHCP_TIMEOUT_US,
+  DhcpClient,
+  type DhcpClientLease,
+  type DhcpClientOptions,
+  type DhcpClientState,
+  type DhcpClientStats,
+  type DhcpLease,
+  type DhcpLeaseState,
+  DhcpServer,
+  type DhcpServerOptions,
+  type DhcpServerStats,
+} from "./dhcp";
+export {
   DEFAULT_DNS_PORT,
   DEFAULT_DNS_RETRIES,
   DEFAULT_DNS_TIMEOUT_US,
