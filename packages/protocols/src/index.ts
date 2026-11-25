@@ -20,6 +20,26 @@ export {
   serializeArp,
 } from "./arp";
 export {
+  DNS_CLASS_IN,
+  DNS_HEADER_LENGTH,
+  DNS_MAX_LABEL_LENGTH,
+  DNS_MAX_NAME_LENGTH,
+  DNS_RCODE_NOERROR,
+  DNS_RCODE_NXDOMAIN,
+  DNS_TYPE_A,
+  type DnsARecord,
+  type DnsFlags,
+  type DnsMessage,
+  type DnsQuestion,
+  type DnsRawRecord,
+  type DnsRecord,
+  type DnsSerializeOptions,
+  dnsNameKey,
+  parseDns,
+  serializeDns,
+  serializeDnsResponse,
+} from "./dns";
+export {
   ETHERNET_HEADER_LENGTH,
   ETHERNET_MIN_FRAME_LENGTH,
   ETHERTYPE_ARP,

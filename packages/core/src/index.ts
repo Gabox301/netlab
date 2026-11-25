@@ -14,6 +14,19 @@ export {
   NetworkInterface,
 } from "./devices";
 export {
+  DEFAULT_DNS_PORT,
+  DEFAULT_DNS_RETRIES,
+  DEFAULT_DNS_TIMEOUT_US,
+  DEFAULT_DNS_TTL_SECONDS,
+  type DnsResolution,
+  type DnsResolutionStatus,
+  DnsResolver,
+  type DnsResolverOptions,
+  DnsServer,
+  type DnsServerOptions,
+  type DnsZone,
+} from "./dns";
+export {
   Host,
   type HostEchoReply,
   type HostIcmpError,
