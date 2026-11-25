@@ -1,20 +1,33 @@
 #!/usr/bin/env bun
 /**
- * `netlab run` entrypoint: load a scenario JSON, run it, print traces.
+ * `netlab` entrypoint: `run` executes a scenario, `validate` judges a solution
+ * against an exercise.
  *
  * Usage: netlab run <scenario.json> [--seed N] [--until 10s] [--format human|json]
- * Exit codes: 0 ok · 1 scenario/runtime error · 2 usage error.
+ *        netlab validate <exercise.json> <solution.json> [--format human|json]
+ * Exit codes: 0 ok · 1 scenario/runtime error or failed check · 2 usage or
+ * parse error.
  */
 
 import { readFile } from "node:fs/promises";
 import { formatHuman, formatJsonLines, formatSummaryJson } from "./format";
 import { runScenario } from "./run";
 import { parseDurationToUs, parseScenarioText } from "./scenario";
+import { runValidate, VALIDATE_USAGE } from "./validate";
+
+const COMMANDS =
+  "Usage: netlab <command> [options]\n" +
+  "  run       run a v1 scenario and print its traces\n" +
+  "  validate  check a solution scenario against an exercise\n";
 
 const USAGE =
+  COMMANDS +
+  "\n" +
   "Usage: netlab run <scenario.json> [--seed N] [--until 10s] [--format human|json]\n" +
   "  run a v1 scenario and print traces (human by default, JSON lines with --format json)\n" +
-  "  --seed N overrides the scenario seed; --until overrides its horizon (e.g. 10s, 100ms)\n";
+  "  --seed N overrides the scenario seed; --until overrides its horizon (e.g. 10s, 100ms)\n" +
+  "\n" +
+  VALIDATE_USAGE;
 
 interface CliArgs {
   file: string;
@@ -35,7 +48,7 @@ function parseArgs(argv: Array<string>): CliArgs {
   }
   if (argv[0] !== "run") {
     throw usageError(
-      `unknown command ${JSON.stringify(argv[0])} (only "run" exists yet)`,
+      `unknown command ${JSON.stringify(argv[0])} (expected "run" or "validate")`,
     );
   }
   const rest = argv.slice(1);
@@ -82,6 +95,9 @@ function parseArgs(argv: Array<string>): CliArgs {
 }
 
 async function main(argv: Array<string>): Promise<number> {
+  if (argv[0] === "validate") {
+    return runValidate(argv.slice(1));
+  }
   let args: CliArgs;
   try {
     args = parseArgs(argv);

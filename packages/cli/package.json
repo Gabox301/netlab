@@ -13,6 +13,7 @@
   "dependencies": {
     "@netlab/bytes": "workspace:*",
     "@netlab/core": "workspace:*",
+    "@netlab/exercises": "workspace:*",
     "@netlab/protocols": "workspace:*",
     "@netlab/shell": "workspace:*"
   }

@@ -6,5 +6,9 @@
   "main": "./src/index.ts",
   "scripts": {
     "test": "bun test"
+  },
+  "dependencies": {
+    "@netlab/core": "workspace:*",
+    "@netlab/shell": "workspace:*"
   }
 }

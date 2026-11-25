@@ -23,6 +23,7 @@
       "dependencies": {
         "@netlab/bytes": "workspace:*",
         "@netlab/core": "workspace:*",
+        "@netlab/exercises": "workspace:*",
         "@netlab/protocols": "workspace:*",
         "@netlab/shell": "workspace:*",
       },
@@ -38,6 +39,10 @@
     "packages/exercises": {
       "name": "@netlab/exercises",
       "version": "0.0.0",
+      "dependencies": {
+        "@netlab/core": "workspace:*",
+        "@netlab/shell": "workspace:*",
+      },
     },
     "packages/pcap": {
       "name": "@netlab/pcap",
