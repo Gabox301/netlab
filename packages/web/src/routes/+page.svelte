@@ -56,6 +56,12 @@ let autoPlayOnResult = true;
 let selectedTraceIndex = $state(-1);
 let scrubUs = $state(0);
 let paused = $state(true);
+const SPEEDS: ReadonlyArray<number> = [0.5, 1, 2, 4];
+let speedIdx = $state(1);
+
+function playInterval(): number {
+  return Math.round(900 / (SPEEDS[speedIdx] ?? 1));
+}
 let tab = $state<TabId>("inspector");
 let showArp = $state(true);
 let showIcmp = $state(true);
@@ -399,7 +405,7 @@ function playFromList(list: PacketRow[], index: number): void {
   stopTimer();
   paused = false;
   selectPacket(target);
-  timer = setInterval(advance, 900);
+  timer = setInterval(advance, playInterval());
 }
 
 function advance(): void {
@@ -440,7 +446,7 @@ function togglePause(): void {
   playFromList(list, Math.max(index, 0));
 }
 
-function step(): void {
+function step(dir: 1 | -1): void {
   if (result === null) {
     return;
   }
@@ -453,9 +459,57 @@ function step(): void {
   const index = list.findIndex(
     (packet) => packet.traceIndex === selectedTraceIndex,
   );
-  const next = list[index < 0 ? 0 : (index + 1) % list.length];
+  const at = index < 0 ? (dir > 0 ? 0 : list.length - 1) : index + dir;
+  const next = list[Math.min(Math.max(at, 0), list.length - 1)];
   if (next !== undefined) {
     selectPacket(next);
+  }
+}
+
+function restart(): void {
+  const first = packets[0];
+  if (result === null || first === undefined) {
+    return;
+  }
+  stopTimer();
+  paused = true;
+  selectPacket(first);
+}
+
+function onSpeedChange(event: Event): void {
+  speedIdx = Number(event.currentTarget.value);
+  if (paused || result === null) {
+    return;
+  }
+  const list = packets;
+  const index = list.findIndex(
+    (packet) => packet.traceIndex === selectedTraceIndex,
+  );
+  playFromList(list, Math.max(index, 0));
+}
+
+function onReplayKey(event: KeyboardEvent): void {
+  if (event.ctrlKey || event.metaKey || event.altKey) {
+    return;
+  }
+  const target = event.target;
+  if (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    target instanceof HTMLButtonElement
+  ) {
+    return;
+  }
+  if (event.key === " ") {
+    event.preventDefault();
+    togglePause();
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    step(1);
+  } else if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    step(-1);
   }
 }
 
@@ -633,6 +687,8 @@ function isNodeActive(id: string): boolean {
   />
 </svelte:head>
 
+<svelte:window onkeydown={onReplayKey} />
+
 <div class="shell">
   <header class="top">
     <div class="logo">Net<b>Lab</b></div>
@@ -660,9 +716,27 @@ function isNodeActive(id: string): boolean {
     >
       ⏸ Pause
     </button>
-    <button type="button" onclick={step} disabled={result === null}>
-      ⏭ Step
+    <button type="button" onclick={() => step(-1)} disabled={result === null} title="Paquete anterior (←)">
+      ⏮ Prev
     </button>
+    <button type="button" onclick={() => step(1)} disabled={result === null} title="Paquete siguiente (→)">
+      ⏭ Next
+    </button>
+    <button type="button" onclick={restart} disabled={result === null} title="Volver al primer paquete">
+      ⟲ Start
+    </button>
+    <label class="speed" title="Velocidad de reproducción">
+      <span>vel</span>
+      <select
+        value={String(speedIdx)}
+        onchange={onSpeedChange}
+        aria-label="Velocidad de reproducción"
+      >
+        {#each SPEEDS as speed, i (speed)}
+          <option value={String(i)}>{speed}×</option>
+        {/each}
+      </select>
+    </label>
   </header>
 
   <main class="workbench">
@@ -1208,6 +1282,23 @@ function isNodeActive(id: string): boolean {
     font-size: 12.5px;
     min-width: 118px;
     text-align: right;
+  }
+
+  .speed {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--mut);
+  }
+
+  .speed select {
+    font: 12px var(--mono);
+    color: var(--ink);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 3px 6px;
   }
 
   .primary {
