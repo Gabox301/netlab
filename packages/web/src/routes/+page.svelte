@@ -1,6 +1,14 @@
 <script lang="ts">
 import { onMount } from "svelte";
-import { buildHexLines, buildPackets, type PacketRow } from "../lib/decode";
+import {
+  buildHexLines,
+  buildPackets,
+  type HexToken,
+  type LayerField,
+  type LayerId,
+  type PacketDir,
+  type PacketRow,
+} from "../lib/decode";
 import type {
   InterfaceSnapshot,
   SimResult,
@@ -15,6 +23,11 @@ const TAB_LABEL: Record<TabId, string> = {
   inspector: "Inspector",
   terminal: "Terminal h1",
   tablas: "Tablas",
+};
+const DIR_LABEL: Record<PacketDir, string> = {
+  tx: "tx →",
+  rx: "← rx",
+  drop: "drop ✕",
 };
 const LINK_MIDPOINTS: Record<string, { x: number; y: number }> = {
   "l-h1-r1": { x: 113, y: 110 },
@@ -32,7 +45,9 @@ let paused = $state(true);
 let tab = $state<TabId>("inspector");
 let showArp = $state(true);
 let showIcmp = $state(true);
-let hoverLayer = $state<string | null>(null);
+let showOtro = $state(true);
+let hoverLayer = $state<LayerId | null>(null);
+let selectedField = $state<{ layer: LayerId; row: number } | null>(null);
 let collapsed = $state<Record<string, boolean>>({});
 
 let worker: Worker | null = null;
@@ -40,9 +55,16 @@ let timer: ReturnType<typeof setInterval> | null = null;
 
 const packets = $derived(result ? buildPackets(result.traces) : []);
 const visiblePackets = $derived(
-  packets.filter((packet) =>
-    packet.decoded.protocol === "ARP" ? showArp : showIcmp,
-  ),
+  packets.filter((packet) => {
+    const protocol = packet.decoded.protocol;
+    if (protocol === "ARP") {
+      return showArp;
+    }
+    if (protocol === "ICMP") {
+      return showIcmp;
+    }
+    return showOtro;
+  }),
 );
 const selectedPacket = $derived(
   packets.find((packet) => packet.traceIndex === selectedTraceIndex) ?? null,
@@ -91,6 +113,18 @@ const hexLines = $derived(
     ? buildHexLines(selectedPacket.decoded.hex, selectedPacket.decoded.layers)
     : [],
 );
+/** Field behind the current selection; null when nothing (or a stale row) is picked. */
+const selectedLayerField = $derived.by((): LayerField | null => {
+  const packet = selectedPacket;
+  const picked = selectedField;
+  if (packet === null || picked === null) {
+    return null;
+  }
+  const layer = packet.decoded.layers.find(
+    (candidate) => candidate.id === picked.layer,
+  );
+  return layer?.rows[picked.row] ?? null;
+});
 const horizon = $derived(result?.horizonUs ?? 10_000);
 
 onMount(() => {
@@ -147,7 +181,7 @@ function handleMessage(message: WorkerResponse): void {
     (packet) => packet.decoded.protocol === "ICMP",
   );
   const initial = next[Math.max(firstIcmp, 0)] ?? null;
-  selectedTraceIndex = initial?.traceIndex ?? -1;
+  setSelectedTrace(initial?.traceIndex ?? -1);
   scrubUs = initial?.t ?? 0;
   if (autoPlayOnResult && next.length > 0) {
     playFromList(next, 0);
@@ -172,8 +206,16 @@ function stopTimer(): void {
 }
 
 function selectPacket(packet: PacketRow): void {
-  selectedTraceIndex = packet.traceIndex;
+  setSelectedTrace(packet.traceIndex);
   scrubUs = packet.t;
+}
+
+function setSelectedTrace(traceIndex: number): void {
+  if (traceIndex !== selectedTraceIndex) {
+    // Offsets belong to one frame: a new frame invalidates the selection.
+    selectedField = null;
+  }
+  selectedTraceIndex = traceIndex;
 }
 
 function selectRow(packet: PacketRow): void {
@@ -260,11 +302,76 @@ function scrubTo(value: number): void {
       chosen = packet;
     }
   }
-  selectedTraceIndex = chosen?.traceIndex ?? -1;
+  setSelectedTrace(chosen?.traceIndex ?? -1);
 }
 
 function toggleLayer(id: string): void {
   collapsed[id] = !collapsed[id];
+}
+
+function isFieldSelected(layer: LayerId, row: number): boolean {
+  return selectedField?.layer === layer && selectedField.row === row;
+}
+
+/** Click a field row: first click selects its bytes, second click clears. */
+function selectField(layer: LayerId, row: number): void {
+  selectedField = isFieldSelected(layer, row) ? null : { layer, row };
+}
+
+/**
+ * Class of one hex byte: the picked field wins over the hovered layer,
+ * `lit` keeps the existing hover behaviour for whole layers.
+ */
+function byteClass(token: HexToken): string {
+  const picked = selectedLayerField;
+  if (
+    picked !== null &&
+    token.byte >= picked.start &&
+    token.byte < picked.end
+  ) {
+    return "sel";
+  }
+  return hoverLayer === token.layer ? "lit" : "";
+}
+
+/** Inspect-first lookup: the byte → field direction of the highlight. */
+function fieldAtByte(byte: number): { layer: LayerId; row: number } | null {
+  const packet = selectedPacket;
+  if (packet === null) {
+    return null;
+  }
+  for (const layer of packet.decoded.layers) {
+    const row = layer.rows.findIndex(
+      (candidate) => byte >= candidate.start && byte < candidate.end,
+    );
+    if (row >= 0) {
+      return { layer: layer.id, row };
+    }
+  }
+  return null;
+}
+
+/** Click a hex byte: select the field that owns it, or clear on pad bytes. */
+function pickByte(byte: number): void {
+  const found = fieldAtByte(byte);
+  if (found === null) {
+    selectedField = null;
+    return;
+  }
+  if (isFieldSelected(found.layer, found.row)) {
+    selectedField = null;
+    return;
+  }
+  collapsed[found.layer] = false;
+  selectedField = found;
+}
+
+function onByteKey(event: KeyboardEvent, byte: number): void {
+  if (event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+  event.preventDefault();
+  pickByte(byte);
 }
 
 function onTabKey(event: KeyboardEvent, id: TabId): void {
@@ -493,6 +600,13 @@ function isNodeActive(id: string): boolean {
           >
             ICMP
           </button>
+          <button
+            type="button"
+            aria-pressed={showOtro}
+            onclick={() => (showOtro = !showOtro)}
+          >
+            OTRO
+          </button>
         </span>
       </h2>
 
@@ -507,6 +621,7 @@ function isNodeActive(id: string): boolean {
           <thead>
             <tr>
               <th>t (µs)</th>
+              <th>dir</th>
               <th>origen</th>
               <th>destino</th>
               <th>proto</th>
@@ -524,6 +639,14 @@ function isNodeActive(id: string): boolean {
                 onkeydown={(event) => onRowKey(event, packet)}
               >
                 <td>{packet.t}</td>
+                <td>
+                  <span
+                    class="dir"
+                    class:tx={packet.dir === "tx"}
+                    class:rx={packet.dir === "rx"}
+                    class:drop={packet.dir === "drop"}
+                  >{DIR_LABEL[packet.dir]}</span>
+                </td>
                 <td>{fromLabel(packet)}</td>
                 <td>{toLabel(packet)}</td>
                 <td>
@@ -534,7 +657,10 @@ function isNodeActive(id: string): boolean {
                   </span>
                 </td>
                 <td>{packet.length}</td>
-                <td>{packet.decoded.summary}</td>
+                <td>
+                  {packet.decoded.summary}{#if packet.dropReason}
+                    <span class="drop-why">· {packet.dropReason}</span>{/if}
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -608,19 +734,40 @@ function isNodeActive(id: string): boolean {
                   </span>
                 </button>
                 {#if !collapsed[layer.id]}
-                  <dl>
-                    {#each layer.rows as [label, value]}
-                      <dt>{label}</dt>
-                      <dd>{value}</dd>
+                  <div class="fields">
+                    {#each layer.rows as row, rowIndex (rowIndex)}
+                      <button
+                        type="button"
+                        class="field"
+                        class:sel={isFieldSelected(layer.id, rowIndex)}
+                        title="Resaltar bytes"
+                        aria-pressed={isFieldSelected(layer.id, rowIndex)}
+                        onclick={() => selectField(layer.id, rowIndex)}
+                      >
+                        <span class="f-label">{row.label}</span>
+                        <span class="f-value">{row.value}</span>
+                      </button>
                     {/each}
-                  </dl>
+                  </div>
                 {/if}
               </div>
             {/each}
 
-            <pre class="hex" aria-label="Volcado hexadecimal del frame">{#each hexLines as line, index (index)}<span class="hexline">{#each line as token}<b class={token.layer} class:lit={hoverLayer === token.layer}>{token.text}</b>{" "}{/each}</span>{/each}</pre>
+            <pre class="hex" aria-label="Volcado hexadecimal del frame">{#each hexLines as line, index (index)}<span class="hexline">{#each line as token (token.byte)}<b
+                      class={token.layer}
+                      class:lit={byteClass(token) === "lit"}
+                      class:sel={byteClass(token) === "sel"}
+                      role="button"
+                      tabindex="0"
+                      aria-pressed={byteClass(token) === "sel"}
+                      title={`byte ${token.byte}`}
+                      onclick={() => pickByte(token.byte)}
+                      onkeydown={(event) => onByteKey(event, token.byte)}
+                      >{token.text}</b
+                    >{" "}{/each}</span>{/each}</pre>
             <p class="hint">
-              Pasá el mouse por una capa para marcar sus bytes.
+              Pasá el mouse por una capa para marcar sus bytes. Clic en un
+              campo (o en un byte) para resaltarlo en ambos sentidos.
             </p>
           {:else}
             <p class="empty">
@@ -1073,6 +1220,27 @@ function isNodeActive(id: string): boolean {
     border: 1px solid currentColor;
   }
 
+  .dir {
+    font-size: 11px;
+    color: var(--mut);
+  }
+
+  .dir.tx {
+    color: var(--mut);
+  }
+
+  .dir.rx {
+    color: var(--ok);
+  }
+
+  .dir.drop {
+    color: var(--bad);
+  }
+
+  .drop-why {
+    color: var(--bad);
+  }
+
   .b-echo {
     color: var(--ok);
   }
@@ -1166,22 +1334,44 @@ function isNodeActive(id: string): boolean {
     text-align: left;
   }
 
-  .layer dl {
-    margin: 0;
-    padding: 8px 12px;
-    display: grid;
-    grid-template-columns: 104px 1fr;
-    gap: 3px 10px;
-    font-family: var(--mono);
-    font-size: 12px;
+  .fields {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 6px 8px;
   }
 
-  .layer dt {
+  .field {
+    display: grid;
+    grid-template-columns: 104px 1fr;
+    gap: 10px;
+    width: 100%;
+    background: transparent;
+    border: 1px solid transparent;
+    padding: 2px 4px;
+    font-family: var(--mono);
+    font-size: 12px;
+    text-align: left;
+  }
+
+  .field:hover {
+    border-color: var(--line);
+  }
+
+  .field.sel {
+    background: var(--sel);
+    border-color: var(--acc);
+  }
+
+  .f-label {
     color: var(--mut);
   }
 
-  .layer dd {
-    margin: 0;
+  .field.sel .f-label {
+    color: var(--acc);
+  }
+
+  .f-value {
     overflow-wrap: anywhere;
   }
 
@@ -1217,6 +1407,11 @@ function isNodeActive(id: string): boolean {
 
   .hex b.lit {
     background: color-mix(in srgb, currentColor 22%, transparent);
+  }
+
+  .hex b.sel {
+    background: color-mix(in srgb, currentColor 45%, transparent);
+    outline: 1px solid currentColor;
   }
 
   .hexline {
