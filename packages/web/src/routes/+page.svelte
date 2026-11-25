@@ -10,8 +10,10 @@ import {
   type PacketRow,
 } from "../lib/decode";
 import type {
+  ExecResponse,
   InterfaceSnapshot,
   SimResult,
+  WireTrace,
   WorkerRequest,
   WorkerResponse,
 } from "../lib/sim-protocol";
@@ -34,6 +36,18 @@ const LINK_MIDPOINTS: Record<string, { x: number; y: number }> = {
   "l-r1-h2": { x: 187, y: 110 },
 };
 const BROADCAST_MAC = "ff:ff:ff:ff:ff:ff";
+/** Host the terminal tab drives; this slice keeps it fixed. */
+const TERM_HOST = "h1";
+/** Command the run transcript comes from, echoed as prior history. */
+const INITIAL_COMMAND = "traceroute 10.0.1.2";
+/** Numbered traceroute hops, highlighted like a live trace. */
+const HOP_LINE = /^\d+ {2}/;
+
+/** One row of the terminal history: typed command, output or error. */
+interface TermEntry {
+  kind: "cmd" | "out" | "err";
+  text: string;
+}
 
 let result = $state<SimResult | null>(null);
 let error = $state<string | null>(null);
@@ -49,11 +63,26 @@ let showOtro = $state(true);
 let hoverLayer = $state<LayerId | null>(null);
 let selectedField = $state<{ layer: LayerId; row: number } | null>(null);
 let collapsed = $state<Record<string, boolean>>({});
+/** Traces produced by terminal commands, appended to the run's list. */
+let sessionTraces = $state<WireTrace[]>([]);
+/** Right edge of the timeline; grows when a command passes the run horizon. */
+let horizonUs = $state(10_000);
+let termLines = $state<TermEntry[]>([]);
+let termInput = $state("");
+let termBusy = $state(false);
+let termScroll = $state<HTMLDivElement | null>(null);
+let termField = $state<HTMLInputElement | null>(null);
+/** Submitted commands, oldest first; `termCursor` -1 means "draft". */
+let termHistory: string[] = [];
+let termCursor = -1;
 
 let worker: Worker | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
 
-const packets = $derived(result ? buildPackets(result.traces) : []);
+/** Run traces plus everything the terminal produced, in arrival order. */
+const allTraces = $derived([...(result?.traces ?? []), ...sessionTraces]);
+const traceTotal = $derived(allTraces.length);
+const packets = $derived(buildPackets(allTraces));
 const visiblePackets = $derived(
   packets.filter((packet) => {
     const protocol = packet.decoded.protocol;
@@ -88,9 +117,7 @@ const deviceRows = $derived.by(() => {
   }));
 });
 const activeTrace = $derived(
-  result && selectedTraceIndex >= 0
-    ? (result.traces[selectedTraceIndex] ?? null)
-    : null,
+  selectedTraceIndex >= 0 ? (allTraces[selectedTraceIndex] ?? null) : null,
 );
 const activeLink = $derived(
   activeTrace?.kind === "frame_tx" ? activeTrace.link : null,
@@ -125,7 +152,7 @@ const selectedLayerField = $derived.by((): LayerField | null => {
   );
   return layer?.rows[picked.row] ?? null;
 });
-const horizon = $derived(result?.horizonUs ?? 10_000);
+const horizon = $derived(horizonUs);
 
 onMount(() => {
   startWorker();
@@ -168,6 +195,10 @@ function requestRun(play: boolean): void {
 }
 
 function handleMessage(message: WorkerResponse): void {
+  if (message.kind === "exec") {
+    handleExecResult(message);
+    return;
+  }
   if (message.kind === "error") {
     handleWorkerError(message.message);
     return;
@@ -175,8 +206,13 @@ function handleMessage(message: WorkerResponse): void {
   const run = message.result;
   const next = buildPackets(run.traces);
   result = run;
+  // A new run is a new interactive session: the worker rebuilt its lab, so
+  // the traces and the transcript on screen start over with it.
+  sessionTraces = [];
+  horizonUs = run.horizonUs;
   loading = false;
   error = null;
+  resetTerminal(run.transcript);
   const firstIcmp = next.findIndex(
     (packet) => packet.decoded.protocol === "ICMP",
   );
@@ -191,12 +227,143 @@ function handleMessage(message: WorkerResponse): void {
   }
 }
 
+/** One shell answer: history, new frames and the advanced virtual clock. */
+function handleExecResult(message: ExecResponse): void {
+  termBusy = false;
+  const entries: TermEntry[] = message.lines.map((text) => ({
+    kind: "out",
+    text,
+  }));
+  if (message.error !== null) {
+    entries.push({ kind: "err", text: message.error });
+  }
+  appendTerm(entries);
+  if (message.traces.length > 0) {
+    // Same wire format as the run, so the packet list and the inspector reuse
+    // their existing decoding; only the arrival index changes.
+    sessionTraces = [...sessionTraces, ...message.traces];
+  }
+  // Commands can pass the capture horizon (ping waits ~1 s, traceroute up to
+  // 30 s): widen the scrubber and move the clock forward, never rewind it.
+  if (message.simTimeUs > horizonUs) {
+    horizonUs = message.simTimeUs;
+  }
+  if (message.simTimeUs > scrubUs) {
+    scrubUs = message.simTimeUs;
+  }
+}
+
 function handleWorkerError(message: string): void {
   error = message;
   loading = false;
+  termBusy = false;
   stopTimer();
   paused = true;
 }
+
+/** Seed the history with the transcript the run already produced. */
+function resetTerminal(transcript: string[]): void {
+  termLines = [
+    { kind: "cmd", text: INITIAL_COMMAND },
+    ...transcript.map((text) => ({ kind: "out" as const, text })),
+  ];
+  termHistory = [];
+  termCursor = -1;
+  termInput = "";
+  termBusy = false;
+}
+
+function appendTerm(entries: TermEntry[]): void {
+  if (entries.length === 0) {
+    return;
+  }
+  termLines = [...termLines, ...entries];
+}
+
+/**
+ * Enter on the terminal input: local echo, `clear`, then the `exec` request.
+ * The prompt is part of the row markup, so the echoed text is the command.
+ */
+function submitTerm(event: SubmitEvent): void {
+  event.preventDefault();
+  if (termBusy) {
+    return;
+  }
+  const cmd = termInput.trim();
+  if (cmd === "") {
+    return;
+  }
+  termInput = "";
+  termCursor = -1;
+  if (cmd === "clear") {
+    // UI-only command: it wipes the local history and never reaches the
+    // shell, so it cannot advance the virtual clock.
+    termLines = [];
+    return;
+  }
+  if (worker === null) {
+    appendTerm([{ kind: "err", text: "worker no disponible" }]);
+    return;
+  }
+  termHistory = [...termHistory, cmd];
+  appendTerm([{ kind: "cmd", text: cmd }]);
+  termBusy = true;
+  const request: WorkerRequest = { type: "exec", host: TERM_HOST, cmd };
+  worker.postMessage(request);
+}
+
+/** Walk the submitted commands; leaving the newest restores the draft. */
+function recallTerm(direction: "older" | "newer"): void {
+  const last = termHistory.length - 1;
+  if (last < 0) {
+    return;
+  }
+  if (direction === "older") {
+    termCursor = termCursor < 0 ? last : Math.max(termCursor - 1, 0);
+    termInput = termHistory[termCursor] ?? "";
+    return;
+  }
+  if (termCursor < 0) {
+    return;
+  }
+  const next = termCursor + 1;
+  if (next > last) {
+    termCursor = -1;
+    termInput = "";
+    return;
+  }
+  termCursor = next;
+  termInput = termHistory[next] ?? "";
+}
+
+function onTermKey(event: KeyboardEvent): void {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+    return;
+  }
+  if (termBusy) {
+    return;
+  }
+  event.preventDefault();
+  recallTerm(event.key === "ArrowUp" ? "older" : "newer");
+}
+
+$effect(() => {
+  const node = termScroll;
+  const lines = termLines;
+  if (node === null) {
+    return;
+  }
+  // Reading `lines` re-runs the effect on every new history array.
+  node.scrollTop = lines.length > 0 ? node.scrollHeight : 0;
+});
+
+$effect(() => {
+  // Disabling the input to wait for an answer blurs it: re-pin the focus so
+  // the next command can be typed without clicking again.
+  if (!termBusy) {
+    termField?.focus();
+  }
+});
 
 function stopTimer(): void {
   if (timer !== null) {
@@ -776,14 +943,44 @@ function isNodeActive(id: string): boolean {
           {/if}
         {:else if tab === "terminal"}
           {#if result}
-            <pre class="terminal" aria-label="Terminal del host h1"><span
-                class="prompt">h1$ traceroute 10.0.1.2</span
-              >{#each result.transcript as line, index (index)}<span
-                  class="term-line"
-                  class:hop={/^\d+ {2}/.test(line)}>{line}</span
-                >{/each}<span class="prompt">h1$ </span><span class="cursor"
-                >▌</span
-              ></pre>
+            <div class="terminal-pane">
+              <div
+                class="terminal"
+                role="log"
+                aria-label="Historial de la terminal del host h1"
+                bind:this={termScroll}
+              >
+                {#each termLines as entry, index (index)}
+                  {#if entry.kind === "cmd"}
+                    <span class="prompt">h1$ {entry.text}</span>
+                  {:else}
+                    <span
+                      class="term-line"
+                      class:err={entry.kind === "err"}
+                      class:hop={entry.kind === "out" && HOP_LINE.test(entry.text)}
+                      >{entry.text}</span
+                    >
+                  {/if}
+                {/each}
+              </div>
+              <form class="term-row" onsubmit={submitTerm}>
+                <label class="term-prompt" for="term-input">h1$</label>
+                <input
+                  id="term-input"
+                  class="term-input"
+                  type="text"
+                  bind:this={termField}
+                  bind:value={termInput}
+                  onkeydown={onTermKey}
+                  disabled={termBusy}
+                  placeholder={termBusy ? "esperando respuesta…" : "comando…"}
+                  autocomplete="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  aria-label="Comando para h1"
+                />
+              </form>
+            </div>
           {:else}
             <p class="empty">Corré la simulación para ver el transcript.</p>
           {/if}
@@ -870,7 +1067,7 @@ function isNodeActive(id: string): boolean {
   <footer class="status">
     <span>
       eventos <b>{result?.events ?? "—"}</b> · trazas
-      <b>{result?.traceCount ?? "—"}</b>
+      <b>{result ? traceTotal : "—"}</b>
     </span>
     <span>
       seed <b>{result?.seed ?? 11}</b> · replay idéntico
@@ -1437,6 +1634,12 @@ function isNodeActive(id: string): boolean {
     border-bottom: 1px solid var(--line);
   }
 
+  .terminal-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
   .terminal {
     font: 12px/1.7 var(--mono);
     background: var(--code);
@@ -1445,6 +1648,8 @@ function isNodeActive(id: string): boolean {
     overflow: auto;
     margin: 0;
     white-space: pre-wrap;
+    min-height: 160px;
+    max-height: 58vh;
   }
 
   .prompt {
@@ -1461,8 +1666,41 @@ function isNodeActive(id: string): boolean {
     color: var(--ok);
   }
 
-  .cursor {
-    color: var(--mut);
+  .term-line.err {
+    color: var(--bad);
+  }
+
+  .term-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--line);
+    background: var(--code);
+    padding: 6px 10px;
+  }
+
+  .term-row:focus-within {
+    border-color: var(--acc);
+  }
+
+  .term-prompt {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink);
+  }
+
+  .term-input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ink);
+    font: 12px var(--mono);
+    padding: 2px 0;
+  }
+
+  .term-input::placeholder {
+    color: var(--dim);
   }
 
   .kv {

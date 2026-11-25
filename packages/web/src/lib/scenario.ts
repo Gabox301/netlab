@@ -42,7 +42,11 @@ const MAC_R1_P0 = "02:00:00:00:00:01";
 const MAC_R1_P1 = "02:00:00:00:00:02";
 const MAC_H2 = "02:00:00:00:00:0b";
 
-interface Lab {
+/**
+ * One live copy of the fixed lab. Exported so the worker can keep an
+ * interactive session (shell state, clock) across commands.
+ */
+export interface Lab {
   sim: Simulation;
   bus: TraceBus;
   h1: Host;
@@ -59,7 +63,8 @@ function link(sim: Simulation, bus: TraceBus, id: string): Link {
   return new Link(sim, id, { latencyUs: LINK_LATENCY_US }, bus);
 }
 
-function buildLab(seed: number): Lab {
+/** Build a fresh copy of the fixed two-subnet lab (clock at 0). */
+export function buildLab(seed: number): Lab {
   const sim = new Simulation(seed);
   const bus = new TraceBus();
   const h1 = new Host(sim, "h1", bus);
@@ -106,7 +111,8 @@ function toHex(frame: Uint8Array): string {
   return out;
 }
 
-function serializeTrace(trace: Trace): WireTrace {
+/** Convert one engine trace into its wire counterpart. */
+export function serializeTrace(trace: Trace): WireTrace {
   switch (trace.kind) {
     case "frame_tx":
       return {

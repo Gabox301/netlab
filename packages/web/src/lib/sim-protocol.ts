@@ -90,12 +90,31 @@ export interface SimResult {
   transcript: string[];
 }
 
-/** Main thread -> worker. The spike has exactly one command. */
-export interface WorkerRequest {
-  type: "run";
+/**
+ * Main thread -> worker. `run` replays the fixed scenario from scratch;
+ * `exec` runs one shell command line on the live interactive session.
+ */
+export type WorkerRequest =
+  | { type: "run" }
+  | { type: "exec"; host: string; cmd: string };
+
+/**
+ * Worker -> main thread: one shell answer. `traces` carries only the frames
+ * produced by this command, so the UI can append them to the packet list;
+ * `error` is null on success and a message on parse/execution failure.
+ */
+export interface ExecResponse {
+  kind: "exec";
+  host: string;
+  cmd: string;
+  lines: string[];
+  error: string | null;
+  simTimeUs: number;
+  traces: WireTrace[];
 }
 
-/** Worker -> main thread: one message with the whole run. */
+/** Worker -> main thread: one message with the whole run or one shell answer. */
 export type WorkerResponse =
   | { kind: "result"; result: SimResult }
+  | ExecResponse
   | { kind: "error"; message: string };
