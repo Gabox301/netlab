@@ -356,6 +356,10 @@ function handleMessage(message: WorkerResponse): void {
     handleExecResult(message);
     return;
   }
+  if (message.kind === "validate") {
+    // The practice page owns validation answers; this tab never asks for one.
+    return;
+  }
   if (message.kind === "error") {
     handleWorkerError(message.message);
     return;
@@ -847,6 +851,7 @@ function isNodeActive(id: string): boolean {
       {result?.scenario ?? "dos-subredes"}.json · seed {result?.seed ?? 11}
     </div>
     <a class="navlink" href="/editor">Editor →</a>
+    <a class="navlink" href="/practica">Práctica →</a>
     <div class="sp"></div>
     <div class="simtime mono" role="timer" aria-label="Tiempo virtual">
       t = {scrubUs} µs

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "id": "capa-2",
+  "title": "Capa 2",
+  "summary": "Switches que aprenden, VLANs y trunks: la red empieza en el cable y en la tabla MAC.",
+  "levels": [
+    {
+      "level": 1,
+      "title": "Aprender e inundar",
+      "exercises": ["l2-flood-vs-learn", "l2-vlan-isolated"]
+    },
+    {
+      "level": 2,
+      "title": "Trunks y vecinos falsos",
+      "exercises": ["l2-trunk-misconfigured", "l2-arp-spoofing"]
+    }
+  ]
+}

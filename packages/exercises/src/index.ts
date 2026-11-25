@@ -11,6 +11,18 @@
 export const PACKAGE = "@netlab/exercises";
 
 export {
+  PRACTICE_EXERCISES,
+  PRACTICE_ROUTE_VERSION,
+  PRACTICE_ROUTES,
+  type PracticeLocation,
+  type PracticeRoute,
+  type PracticeRouteLevel,
+  parsePracticeRoute,
+  practiceExercise,
+  practiceLocation,
+  practiceRoute,
+} from "./catalog";
+export {
   type ArpCheckDef,
   type CheckDef,
   DEFAULT_UNTIL_US,

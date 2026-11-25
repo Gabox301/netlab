@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "id": "direccionamiento-y-ruteo",
+  "title": "Direccionamiento y ruteo",
+  "summary": "Máscaras, subredes, gateways y rutas: decidir quién es vecino y por dónde sale cada paquete.",
+  "levels": [
+    {
+      "level": 1,
+      "title": "Subredes y VLSM",
+      "exercises": ["ip-subnetting-basic", "ip-vlsm", "ip-wrong-mask"]
+    },
+    {
+      "level": 2,
+      "title": "Direcciones sanas y gateway",
+      "exercises": ["ip-duplicate", "ip-missing-gateway", "rt-two-networks"]
+    },
+    {
+      "level": 3,
+      "title": "Elegir el camino",
+      "exercises": ["rt-default-route", "rt-specific-route", "rt-ttl-loop"]
+    },
+    {
+      "level": 4,
+      "title": "Convergencia e ICMP",
+      "exercises": [
+        "rt-convergence",
+        "icmp-traceroute",
+        "icmp-mtu-fragmentation",
+        "icmp-frag-needed-df"
+      ]
+    }
+  ]
+}

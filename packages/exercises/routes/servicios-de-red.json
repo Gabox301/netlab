@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "id": "servicios-de-red",
+  "title": "Servicios de red",
+  "summary": "DNS, DHCP y HTTP: cuando la red funciona pero el servicio no aparece donde se lo espera.",
+  "levels": [
+    {
+      "level": 1,
+      "title": "Resolver y asignar",
+      "exercises": ["svc-dns-broken", "svc-dhcp-exhausted"]
+    },
+    {
+      "level": 2,
+      "title": "Llegar al servicio",
+      "exercises": ["svc-http-port"]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "id": "tcp-a-fondo",
+  "title": "TCP a fondo",
+  "summary": "Handshake, retransmisión, ventana y cuello de botella: seguir una conexión byte por byte.",
+  "levels": [
+    {
+      "level": 1,
+      "title": "Abrir la conexión",
+      "exercises": ["tcp-handshake"]
+    },
+    {
+      "level": 2,
+      "title": "Lo que TCP repara",
+      "exercises": ["tcp-retransmission", "tcp-zero-window"]
+    },
+    {
+      "level": 3,
+      "title": "Rendimiento y bordes",
+      "exercises": ["tcp-congestion", "tcp-closed-port"]
+    }
+  ]
+}

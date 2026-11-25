@@ -92,11 +92,51 @@ export interface SimResult {
 
 /**
  * Main thread -> worker. `run` replays the fixed scenario from scratch;
- * `exec` runs one shell command line on the live interactive session.
+ * `exec` runs one shell command line on the live interactive session;
+ * `validate` judges one uploaded practice solution against its exercise.
  */
 export type WorkerRequest =
   | { type: "run" }
-  | { type: "exec"; host: string; cmd: string };
+  | { type: "exec"; host: string; cmd: string }
+  | ValidateRequest;
+
+/**
+ * One validation request (F-112): the exercise travels as the raw catalog
+ * JSON and the solution as the scenario v1 the editor exports. Both are
+ * parsed inside the worker; a malformed upload is an answer, not a crash.
+ */
+export interface ValidateRequest {
+  type: "validate";
+  exercise: unknown;
+  solution: unknown;
+}
+
+/** One check verdict, mirrored from `@netlab/exercises` for the wire. */
+export interface ValidateCheck {
+  name: string;
+  pass: boolean;
+  detail: string;
+}
+
+/** Run summary of the validation run (the CLI's `RunSummary`). */
+export interface ValidateRunSummary {
+  seed: number;
+  finalTime: number;
+  processed: number;
+}
+
+/**
+ * Worker -> main thread: one flat validation verdict. Deliberately not a
+ * `SimResult`: the practice panel renders checks and a score, not packets.
+ */
+export interface ValidateResponse {
+  kind: "validate";
+  pass: boolean;
+  checks: ValidateCheck[];
+  run: ValidateRunSummary | null;
+  /** Parse/run error; `pass` is false and `checks` is empty when set. */
+  error: string | null;
+}
 
 /**
  * Worker -> main thread: one shell answer. `traces` carries only the frames
@@ -113,8 +153,10 @@ export interface ExecResponse {
   traces: WireTrace[];
 }
 
-/** Worker -> main thread: one message with the whole run or one shell answer. */
+/** Worker -> main thread: one message with the whole run, one shell answer
+ * or one validation verdict. */
 export type WorkerResponse =
   | { kind: "result"; result: SimResult }
   | ExecResponse
+  | ValidateResponse
   | { kind: "error"; message: string };

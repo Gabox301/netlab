@@ -2,11 +2,22 @@
  * Simulation worker (S3, S10): runs the fixed two-subnet lab off the main
  * thread and keeps one interactive shell session per host, so the terminal
  * tab can run commands against the same live lab the UI is inspecting. It
- * imports only `@netlab/*` engine packages — never SvelteKit or client UI
- * code.
+ * also validates practice solutions (F-112) with the exact runner
+ * `netlab validate` uses. It imports only `@netlab/*` engine packages — never
+ * SvelteKit or client UI code.
  */
 
+import {
+  parseScenarioJson,
+  runScenario as runExerciseScenario,
+  type Scenario,
+} from "@netlab/cli";
 import type { Host } from "@netlab/core";
+import {
+  parseExerciseJson,
+  prepareScenario,
+  validateExercise,
+} from "@netlab/exercises";
 import { Shell } from "@netlab/shell";
 import {
   buildLab,
@@ -126,10 +137,49 @@ async function handleExec(request: {
   scope.postMessage(response);
 }
 
+/**
+ * Validate one uploaded solution (F-112) through the same pipeline as
+ * `netlab validate`: parse the exercise and the student scenario, append the
+ * probes the checks need, run once with the CLI runner and answer with the
+ * flat verdict. Parse errors are a normal answer so the panel can show them.
+ */
+async function handleValidate(request: {
+  exercise: unknown;
+  solution: unknown;
+}): Promise<void> {
+  try {
+    const exercise = parseExerciseJson(request.exercise);
+    const scenario = parseScenarioJson(request.solution);
+    const prepared = prepareScenario(exercise, scenario);
+    const result = await validateExercise(exercise, prepared, (value) =>
+      runExerciseScenario(value as Scenario),
+    );
+    scope.postMessage({
+      kind: "validate",
+      pass: result.pass,
+      checks: result.checks,
+      run: result.run,
+      error: null,
+    });
+  } catch (cause) {
+    scope.postMessage({
+      kind: "validate",
+      pass: false,
+      checks: [],
+      run: null,
+      error: errorMessage(cause),
+    });
+  }
+}
+
 scope.onmessage = (event) => {
   const request = event.data;
   if (request.type === "run") {
     void handleRun();
+    return;
+  }
+  if (request.type === "validate") {
+    void handleValidate(request);
     return;
   }
   void handleExec(request);

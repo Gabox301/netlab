@@ -12,6 +12,7 @@
   "dependencies": {
     "@netlab/cli": "workspace:*",
     "@netlab/core": "workspace:*",
+    "@netlab/exercises": "workspace:*",
     "@netlab/protocols": "workspace:*",
     "@netlab/shell": "workspace:*"
   },
