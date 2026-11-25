@@ -29,7 +29,7 @@
  *   pending byte at SND.NXT without spending sequence space and re-arms
  *   itself, so the peer answers with its current window. This is deliberately
  *   not the RTO of hito 5.4: no RTT estimate, no backoff, no retransmission
- *   queue — a lost segment still stays lost.
+ *   queue — it only asks for a window, the data stays queued.
  * - Receiver. The advertised window is `capacity - buffered`, where the
  *   buffer is both the in-order bytes `read()` has not drained yet and the
  *   out-of-order bytes held for reassembly, and `capacity` (`receiveCapacity`,
@@ -41,16 +41,32 @@
  *   reopens a zero window sends a window update at once. Payload that does not
  *   fit the current window is dropped and re-ACKed, never delivered.
  *
- * Still out of scope: RTO, retransmission and fast retransmit (5.4) and
- * congestion control (5.5). A transfer therefore only completes on a lossless
- * path. Control traffic does not gate on data: FIN is queued behind
- * outstanding data and only leaves once the peer has acknowledged every byte.
+ * Scope of hito 5.4 — retransmission:
+ *
+ * - RTO. Every segment that spends sequence space (data, SYN, FIN) is kept in
+ *   a copy queue until a cumulative ACK covers it, and the first one in that
+ *   queue arms the retransmission timer. When the timer expires the oldest
+ *   unacknowledged segment is resent byte for byte (same sequence number, same
+ *   payload) and the timeout doubles, up to `maxRtoUs`. Any ACK that advances
+ *   SND.UNA drops the copies it covers, puts the timeout back to `rtoUs` and
+ *   restarts the timer for whatever is still outstanding. Timeouts do **not**
+ *   produce an RTT sample (Karn's rule: a resent segment is ambiguous), so the
+ *   base value stays fixed; measuring RTT belongs to hito 5.5.
+ * - Fast retransmit. Three duplicate ACKs at SND.UNA mean the head segment is
+ *   missing while later ones got through, so it is resent immediately instead
+ *   of waiting for the timer. There is no fast recovery: the window does not
+ *   shrink and the RTO is not reset — congestion control is hito 5.5.
+ *
+ * Still out of scope: congestion control (5.5) — `sendWindow` (the stand-in
+ * for `cwnd`) never grows and never backs off. Control traffic does not gate
+ * on data: FIN is queued behind outstanding data and only leaves once the peer
+ * has acknowledged every byte.
  *
  * Time and randomness come from the `Simulation`: the ISN and the ephemeral
  * local port are drawn from `sim.random` (overridable for tests), while
- * TIME_WAIT and the zero-window persist timer are `sim.schedule()` events, so
- * `runUntil()` — never `runAll()` — drives a close or a stalled sender with a
- * timer still armed.
+ * TIME_WAIT, the zero-window persist timer and the RTO are `sim.schedule()`
+ * events, so `runUntil()` — never `runAll()` — drives a close, a stalled
+ * sender or a dead wire with a timer still re-arming.
  */
 
 import { Ipv4Address } from "@netlab/bytes";
@@ -106,6 +122,17 @@ export const DEFAULT_ZERO_WINDOW_PROBE_US = 1_000_000;
 /** Largest window value the 16-bit header field can carry. */
 const MAX_WINDOW = 0xffff;
 
+/**
+ * Retransmission timeout before any backoff (hito 5.4).
+ *
+ * The value is deliberately fixed: an RTT estimator lands in hito 5.5, so for
+ * now every timeout starts from this base and only grows by backoff.
+ */
+export const DEFAULT_RTO_US = 1_000_000;
+
+/** Ceiling of the exponential RTO backoff (hito 5.4). */
+export const DEFAULT_MAX_RTO_US = 60_000_000;
+
 /** RFC 6335 dynamic port range used for ephemeral local ports. */
 const TCP_EPHEMERAL_MIN = 49152;
 const TCP_EPHEMERAL_MAX = 65535;
@@ -154,6 +181,14 @@ export interface TcpSocketOptions {
    * unrelated to the RTO of hito 5.4.
    */
   zeroWindowProbeUs?: number;
+  /**
+   * Retransmission timeout before backoff; default {@link DEFAULT_RTO_US}
+   * (1 s). It is the value the timer returns to whenever an ACK advances
+   * SND.UNA, and the starting point of the exponential backoff.
+   */
+  rtoUs?: number;
+  /** Ceiling of the RTO backoff; default {@link DEFAULT_MAX_RTO_US} (60 s). */
+  maxRtoUs?: number;
   /** Called with each in-order chunk of received data (a fresh copy). */
   onData?: (data: Uint8Array) => void;
 }
@@ -162,6 +197,18 @@ export interface TcpSocketOptions {
 export interface TcpConnectOptions {
   /** Fixed local port; default an ephemeral port from the dynamic range. */
   localPort?: number;
+}
+
+/**
+ * One segment put on the wire and not acknowledged yet: the copy the RTO
+ * resends. `ack` and `flags` are the ones the original segment carried, so a
+ * retransmission repeats its sequence number and payload byte for byte.
+ */
+interface OutstandingSegment {
+  seq: number;
+  ack: number;
+  flags: TcpFlags;
+  payload: Uint8Array;
 }
 
 function checkPort(value: number): number {
@@ -188,6 +235,16 @@ function advanceSequence(value: number, length: number): number {
 }
 
 /**
+ * True when `a` comes strictly before `b` in the 32-bit sequence space.
+ * Plain `<` would break across the wrap, and the distance has to stay below
+ * half the space for the comparison to mean anything.
+ */
+function sequenceBefore(a: number, b: number): boolean {
+  const delta = (b - a) >>> 0;
+  return delta !== 0 && delta < 0x8000_0000;
+}
+
+/**
  * One TCP connection (or one listening port) on a host.
  *
  * `listen()` reserves a port and waits for a SYN; `connect()` starts the
@@ -211,6 +268,10 @@ export class TcpSocket {
   readonly receiveCapacity: number;
   /** Fixed interval of the zero-window persist timer. */
   readonly zeroWindowProbeUs: number;
+  /** Retransmission timeout used after an ACK advances SND.UNA. */
+  readonly rtoBaseUs: number;
+  /** Ceiling the exponential backoff saturates at. */
+  readonly maxRtoUs: number;
 
   private readonly initialSequence: number | undefined;
   private readonly timeWaitUs: number;
@@ -232,6 +293,18 @@ export class TcpSocket {
   private sndWndValue: number | undefined = undefined;
   private timeWaitTimer: TimerHandle | undefined = undefined;
   private zeroWindowTimer: TimerHandle | undefined = undefined;
+  /** Retransmission timer: armed whenever a segment is unacknowledged. */
+  private rtoTimer: TimerHandle | undefined = undefined;
+  /** RTO currently in force: the base value, doubled by each timeout. */
+  private rtoValue: number;
+  /** Consecutive duplicate ACKs seen at SND.UNA (fast retransmit, RFC 5681). */
+  private duplicateAcks = 0;
+  /**
+   * Segments sent and not acknowledged yet, oldest first: the copies the RTO
+   * resends. Data, SYN and FIN all spend sequence space, so all three are
+   * kept until a cumulative ACK covers them.
+   */
+  private readonly outstanding: Array<OutstandingSegment> = [];
   /**
    * Payload waiting for window space, as MSS chunks. The head entry can shrink
    * when only part of the advertised window is left, so it always starts at
@@ -291,6 +364,19 @@ export class TcpSocket {
       );
     }
     this.zeroWindowProbeUs = zeroWindowProbeUs;
+    const rtoUs = options.rtoUs ?? DEFAULT_RTO_US;
+    if (!Number.isFinite(rtoUs) || rtoUs <= 0) {
+      throw new RangeError(`rtoUs must be a finite value > 0: ${rtoUs}`);
+    }
+    const maxRtoUs = options.maxRtoUs ?? DEFAULT_MAX_RTO_US;
+    if (!Number.isFinite(maxRtoUs) || maxRtoUs < rtoUs) {
+      throw new RangeError(
+        `maxRtoUs must be a finite value >= rtoUs (${rtoUs}): ${maxRtoUs}`,
+      );
+    }
+    this.rtoBaseUs = rtoUs;
+    this.maxRtoUs = maxRtoUs;
+    this.rtoValue = rtoUs;
   }
 
   /** Current state of the connection. */
@@ -352,6 +438,18 @@ export class TcpSocket {
   }
 
   /**
+   * Retransmission timeout currently in force.
+   *
+   * Starts at {@link rtoBaseUs}, doubles on every timeout up to
+   * {@link maxRtoUs}, and returns to the base value whenever an ACK advances
+   * SND.UNA. There is no RTT sample yet: a retransmitted segment produces
+   * none (Karn), and the estimator arrives with congestion control (5.5).
+   */
+  get rtoUs(): number {
+    return this.rtoValue;
+  }
+
+  /**
    * Reserve `port` and wait for a SYN (CLOSED → LISTEN).
    *
    * One connection per socket in this milestone: there is no accept backlog
@@ -396,7 +494,7 @@ export class TcpSocket {
     this.sndUnaValue = nextSequence(this.issValue);
     this.sndNxtValue = nextSequence(this.issValue);
     this.transition("SYN_SENT");
-    this.emit({ syn: true }, this.issValue, 0);
+    this.transmit({ syn: true }, this.issValue, 0);
   }
 
   /**
@@ -567,7 +665,7 @@ export class TcpSocket {
     this.sndUnaValue = nextSequence(this.issValue);
     this.sndNxtValue = nextSequence(this.issValue);
     this.transition("SYN_RECEIVED");
-    this.emit({ syn: true, ack: true }, this.issValue, this.rcvNxtValue);
+    this.transmit({ syn: true, ack: true }, this.issValue, this.rcvNxtValue);
   }
 
   /** SYN_SENT: SYN+ACK completes the open, a bare SYN is a simultaneous open. */
@@ -582,13 +680,18 @@ export class TcpSocket {
       if (segment.ack !== this.sndNxtValue) {
         return;
       }
+      this.acknowledgeAll();
       this.transition("ESTABLISHED");
       this.emit({ ack: true }, this.sndNxtValue, this.rcvNxtValue);
       return;
     }
     // Both ends opened at once: answer the peer's SYN with our SYN+ACK.
     this.transition("SYN_RECEIVED");
-    this.emit({ syn: true, ack: true }, this.issValue ?? 0, this.rcvNxtValue);
+    this.transmit(
+      { syn: true, ack: true },
+      this.issValue ?? 0,
+      this.rcvNxtValue,
+    );
   }
 
   /** SYN_RECEIVED: the ACK of our SYN+ACK (or of our SYN) opens both ends. */
@@ -596,6 +699,7 @@ export class TcpSocket {
     if (!segment.flags.ack || segment.ack !== this.sndNxtValue) {
       return;
     }
+    this.acknowledgeAll();
     this.sndWndValue = segment.window;
     this.transition("ESTABLISHED");
   }
@@ -606,6 +710,12 @@ export class TcpSocket {
    */
   private receiveInEstablished(segment: TcpSegment): void {
     this.processAck(segment);
+    if (segment.flags.syn) {
+      // The peer is still in SYN_RECEIVED, so the ACK that completed its open
+      // was lost and its RTO re-sent the SYN+ACK: acknowledge it again.
+      this.sendAck();
+      return;
+    }
     const dataAcked = this.acceptPayload(segment);
     if (!segment.flags.fin) {
       if (dataAcked) {
@@ -732,10 +842,24 @@ export class TcpSocket {
     }
     this.sndWndValue = segment.window;
     if (acked === 0) {
+      // A duplicate ACK still carries a window update, and it is how a
+      // fast retransmit learns that a segment went missing (RFC 5681).
+      if (
+        segment.payload.length === 0 &&
+        !segment.flags.syn &&
+        !segment.flags.fin &&
+        this.outstanding.length > 0
+      ) {
+        this.duplicateAcks += 1;
+        if (this.duplicateAcks === 3) {
+          this.fastRetransmit();
+        }
+      }
       this.flushSend();
       return;
     }
     this.sndUnaValue = segment.ack;
+    this.onAckAdvanced();
     this.flushSend();
     this.maybeSendFin();
   }
@@ -774,7 +898,12 @@ export class TcpSocket {
         this.sendQueueHead += 1;
       }
       this.sndNxtValue = advanceSequence(sndNxt, length);
-      this.emit({ ack: true, psh: true }, sndNxt, this.rcvNxtValue ?? 0, piece);
+      this.transmit(
+        { ack: true, psh: true },
+        sndNxt,
+        this.rcvNxtValue ?? 0,
+        piece,
+      );
     }
     this.sendQueue.length = 0;
     this.sendQueueHead = 0;
@@ -852,6 +981,160 @@ export class TcpSocket {
     );
   }
 
+  /**
+   * Emit one segment and, when it spends sequence space, keep a copy for
+   * retransmission and arm the RTO.
+   *
+   * The copy is what the timer and the fast retransmit resend: the payload is
+   * taken by value, so later reuse of the send buffer cannot change bytes that
+   * are already on the wire.
+   */
+  private transmit(
+    flags: Partial<TcpFlags>,
+    seq: number,
+    ack: number,
+    payload: Uint8Array = NO_PAYLOAD,
+  ): void {
+    this.emit(flags, seq, ack, payload);
+    if (payload.length === 0 && flags.syn !== true && flags.fin !== true) {
+      // Pure ACKs spend no sequence space and are never retransmitted.
+      return;
+    }
+    const stored: OutstandingSegment = {
+      seq,
+      ack,
+      flags: { ...NO_FLAGS, ...flags },
+      payload: new Uint8Array(payload),
+    };
+    const last = this.outstanding.at(-1);
+    if (last !== undefined && last.seq === seq) {
+      // A simultaneous open answers our SYN with our own SYN+ACK: same
+      // sequence number, so it replaces the queued SYN instead of stacking.
+      this.outstanding[this.outstanding.length - 1] = stored;
+    } else {
+      this.outstanding.push(stored);
+    }
+    this.armRto();
+  }
+
+  /** Arm the retransmission timer when something is outstanding and idle. */
+  private armRto(): void {
+    if (this.rtoTimer !== undefined || this.outstanding.length === 0) {
+      return;
+    }
+    this.rtoTimer = this.sim.schedule(this.rtoValue, () => {
+      this.rtoTimer = undefined;
+      this.onRto();
+    });
+  }
+
+  private cancelRto(): void {
+    const timer = this.rtoTimer;
+    this.rtoTimer = undefined;
+    timer?.cancel();
+  }
+
+  /**
+   * RTO expiry: resend the oldest unacknowledged segment and back off.
+   *
+   * Karn's rule keeps the clock honest: a resent segment carries no RTT
+   * sample, and there is no estimator yet (5.5), so the timeout only doubles —
+   * up to `maxRtoUs` — until an ACK advances SND.UNA.
+   */
+  private onRto(): void {
+    if (this.outstanding.length === 0 || !this.canRetransmit()) {
+      return;
+    }
+    // The resend restarts the duplicate-ACK count: those ACKs were about the
+    // lost attempt, and it is the timer that answered them now.
+    this.duplicateAcks = 0;
+    this.retransmitOldest();
+    this.rtoValue = Math.min(this.rtoValue * 2, this.maxRtoUs);
+    this.armRto();
+  }
+
+  /**
+   * Fast retransmit (RFC 5681): three duplicate ACKs at SND.UNA say the head
+   * segment is missing while later ones got through, so it goes out again at
+   * once instead of waiting for the timer.
+   *
+   * No fast recovery (hito 5.5): `sendWindow` and the RTO stay untouched, so
+   * this only saves one timeout — it does not react to congestion.
+   */
+  private fastRetransmit(): void {
+    const oldest = this.outstanding[0];
+    if (oldest === undefined || oldest.payload.length === 0) {
+      return;
+    }
+    this.retransmitOldest();
+  }
+
+  /** Resend the oldest outstanding segment: same SEQ, same ACK, same bytes. */
+  private retransmitOldest(): void {
+    const segment = this.outstanding[0];
+    if (segment === undefined) {
+      return;
+    }
+    this.emit(segment.flags, segment.seq, segment.ack, segment.payload);
+  }
+
+  /** States in which an outstanding segment may still be resent. */
+  private canRetransmit(): boolean {
+    switch (this.stateValue) {
+      case "CLOSED":
+      case "LISTEN":
+      case "FIN_WAIT_2":
+      case "TIME_WAIT":
+        return false;
+      default:
+        return true;
+    }
+  }
+
+  /** Drop the copies a cumulative ACK has fully covered. */
+  private purgeAcknowledged(): void {
+    const sndUna = this.sndUnaValue;
+    if (sndUna === undefined) {
+      this.outstanding.length = 0;
+      return;
+    }
+    while (this.outstanding.length > 0) {
+      const head = this.outstanding[0];
+      if (head === undefined) {
+        break;
+      }
+      const control = (head.flags.syn ? 1 : 0) + (head.flags.fin ? 1 : 0);
+      const end = advanceSequence(head.seq, head.payload.length + control);
+      if (sequenceBefore(sndUna, end)) {
+        // Still (partly) outstanding. A partially acknowledged segment stays
+        // queued whole: resending a few acknowledged bytes is legal, and this
+        // sender never hands out a segment longer than the free window.
+        break;
+      }
+      this.outstanding.shift();
+    }
+  }
+
+  /** Forget the duplicate-ACK count and put the RTO back at its base value. */
+  private resetRetransmission(): void {
+    this.duplicateAcks = 0;
+    this.rtoValue = this.rtoBaseUs;
+    this.cancelRto();
+  }
+
+  /** An ACK advanced SND.UNA: the path is alive again, restart the clock. */
+  private onAckAdvanced(): void {
+    this.resetRetransmission();
+    this.purgeAcknowledged();
+    this.armRto();
+  }
+
+  /** The handshake acknowledged everything we sent (our SYN or SYN+ACK). */
+  private acknowledgeAll(): void {
+    this.resetRetransmission();
+    this.outstanding.length = 0;
+  }
+
   /** Window this socket advertises: the free part of its receive buffer. */
   private freeReceiveWindow(): number {
     const free = this.receiveCapacity - this.bufferedBytes();
@@ -904,7 +1187,7 @@ export class TcpSocket {
     }
     this.finQueued = false;
     this.sndNxtValue = nextSequence(sndNxt);
-    this.emit({ fin: true, ack: true }, sndNxt, this.rcvNxtValue ?? 0);
+    this.transmit({ fin: true, ack: true }, sndNxt, this.rcvNxtValue ?? 0);
   }
 
   /**
@@ -1092,6 +1375,9 @@ export class TcpSocket {
   private release(): void {
     this.cancelTimeWait();
     this.cancelZeroWindowProbe();
+    // A torn-down connection has nothing left to retransmit.
+    this.resetRetransmission();
+    this.outstanding.length = 0;
     const binding = this.binding;
     this.binding = undefined;
     binding?.close();
@@ -1100,6 +1386,8 @@ export class TcpSocket {
   /** Forget the peer and sequence state of a previous connection. */
   private clearTcb(): void {
     this.cancelZeroWindowProbe();
+    this.resetRetransmission();
+    this.outstanding.length = 0;
     this.remoteIpValue = undefined;
     this.remotePortValue = undefined;
     this.issValue = undefined;

@@ -1,14 +1,16 @@
 /**
- * TCP machine (F-54/55/56/57): three-way handshake, simultaneous open,
+ * TCP machine (F-54/55/56/57/58): three-way handshake, simultaneous open,
  * four-way close with TIME_WAIT expiry, RST for closed ports, a handshake
- * through a router, ordered payload transfer with cumulative ACKs, and the
+ * through a router, ordered payload transfer with cumulative ACKs, the
  * sliding window with flow control (advertised window, zero-window probing,
- * backpressure from a slow receiver).
+ * backpressure from a slow receiver), and retransmission (RTO with backoff,
+ * fast retransmit on the third duplicate ACK).
  *
  * Every run is deterministic: explicit MACs, explicit ISNs and the
  * simulation clock driven by `runAll()` (no timers left) or `runUntil()`
- * (TIME_WAIT or a zero-window probe still armed — `runAll()` would spin on a
- * persist timer that keeps re-arming while the peer window stays closed).
+ * (TIME_WAIT, a zero-window probe or an RTO still armed — `runAll()` would
+ * spin on a persist timer that keeps re-arming while the peer window stays
+ * closed, and on an RTO that keeps re-sending into a dead wire).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -25,17 +27,20 @@ import {
 } from "@netlab/protocols";
 import { connect } from "../src/devices";
 import { Host, type HostTcpSegment } from "../src/host";
-import { Link } from "../src/link";
+import { Link, type LinkParams } from "../src/link";
 import { Router } from "../src/route";
 import { Simulation } from "../src/sim";
 import {
+  DEFAULT_MAX_RTO_US,
   DEFAULT_MSS,
+  DEFAULT_RTO_US,
   DEFAULT_SEND_WINDOW,
   DEFAULT_TIME_WAIT_US,
   TcpSocket,
+  type TcpSocketOptions,
   type TcpState,
 } from "../src/tcp";
-import { type Trace, TraceBus } from "../src/trace";
+import { type DropReason, type Trace, TraceBus } from "../src/trace";
 
 const LATENCY_US = 10;
 const MASK_24 = "255.255.255.0";
@@ -122,27 +127,87 @@ function routedLink(): RoutedRig {
   return { sim, bus, a, b };
 }
 
-/** TCP segments `from` put on the wire, decoded from the frame traces. */
-function tcpSegments(traces: Array<Trace>, from: "a" | "b"): Array<TcpSegment> {
-  const out: Array<TcpSegment> = [];
+/** Decode the TCP segment carried by one Ethernet frame, if any. */
+function decodeTcp(frame: Uint8Array): TcpSegment | undefined {
+  const eth = parseEthernet(frame);
+  if (!eth.ok || eth.value.etherType !== ETHERTYPE_IPV4) {
+    return undefined;
+  }
+  const ip = parseIpv4(eth.value.payload);
+  if (!ip.ok || ip.value.header.protocol !== IPV4_PROTOCOL_TCP) {
+    return undefined;
+  }
+  const seg = parseTcp(ip.value.payload, {
+    src: ip.value.header.src,
+    dst: ip.value.header.dst,
+  });
+  return seg.ok ? seg.value : undefined;
+}
+
+/** TCP segments `from` put on the wire, each with the time of its frame. */
+function tcpFrames(
+  traces: Array<Trace>,
+  from: "a" | "b",
+): Array<{ t: number; seg: TcpSegment }> {
+  const out: Array<{ t: number; seg: TcpSegment }> = [];
   for (const trace of traces) {
     if (trace.kind !== "frame_tx" || trace.from !== from) {
       continue;
     }
-    const eth = parseEthernet(trace.frame);
-    if (!eth.ok || eth.value.etherType !== ETHERTYPE_IPV4) {
+    const seg = decodeTcp(trace.frame);
+    if (seg !== undefined) {
+      out.push({ t: trace.t, seg });
+    }
+  }
+  return out;
+}
+
+/** TCP segments `from` put on the wire, decoded from the frame traces. */
+function tcpSegments(traces: Array<Trace>, from: "a" | "b"): Array<TcpSegment> {
+  return tcpFrames(traces, from).map((frame) => frame.seg);
+}
+
+/** TCP segments the link dropped for `reason`, with the time of the drop. */
+function droppedTcp(
+  traces: Array<Trace>,
+  reason: DropReason = "loss",
+): Array<{ t: number; seg: TcpSegment }> {
+  const out: Array<{ t: number; seg: TcpSegment }> = [];
+  for (const trace of traces) {
+    if (trace.kind !== "frame_drop" || trace.reason !== reason) {
       continue;
     }
-    const ip = parseIpv4(eth.value.payload);
-    if (!ip.ok || ip.value.header.protocol !== IPV4_PROTOCOL_TCP) {
+    const seg = decodeTcp(trace.frame);
+    if (seg !== undefined) {
+      out.push({ t: trace.t, seg });
+    }
+  }
+  return out;
+}
+
+/**
+ * Every attempt to put the payload segment starting at `seq` on the wire, in
+ * order: frames the link delivered (`frame_tx`) and frames it dropped
+ * (`frame_drop`, emitted instead of `frame_tx` when the drop is decided).
+ */
+function attemptFrames(
+  traces: Array<Trace>,
+  seq: number,
+  from: "a" | "b" = "a",
+): Array<{ t: number; seg: TcpSegment; delivered: boolean }> {
+  const tag = `:${from}>`;
+  const out: Array<{ t: number; seg: TcpSegment; delivered: boolean }> = [];
+  for (const trace of traces) {
+    if (trace.kind !== "frame_tx" && trace.kind !== "frame_drop") {
       continue;
     }
-    const seg = parseTcp(ip.value.payload, {
-      src: ip.value.header.src,
-      dst: ip.value.header.dst,
-    });
-    if (seg.ok) {
-      out.push(seg.value);
+    const delivered = trace.kind === "frame_tx";
+    if (delivered ? trace.from !== from : !trace.where.includes(tag)) {
+      continue;
+    }
+    const seg = decodeTcp(trace.frame);
+    if (seg !== undefined && seg.payload.length > 0 && seg.seq === seq) {
+      out.push({ t: trace.t, seg, delivered });
     }
   }
   return out;
@@ -464,6 +529,7 @@ function inject(
     ack: number;
     payload?: Uint8Array;
     fin?: boolean;
+    syn?: boolean;
   },
 ): void {
   const remoteIp = from.remoteIp ?? "";
@@ -474,7 +540,12 @@ function inject(
       dstPort: to.localPort ?? 0,
       seq: opts.seq,
       ack: opts.ack,
-      flags: { ...NO_FLAGS, ack: true, fin: opts.fin === true },
+      flags: {
+        ...NO_FLAGS,
+        ack: true,
+        fin: opts.fin === true,
+        syn: opts.syn === true,
+      },
       window: 4096,
       urgent: 0,
       payload: opts.payload ?? new Uint8Array(0),
@@ -854,5 +925,365 @@ describe("tcp sliding window and flow control (F-57)", () => {
     expect(steps.at(-1)).toBe(payload.length);
     expect(server.rcvNxt).toBe(start + payload.length);
     expect(joined(chunks)).toEqual(payload);
+  });
+});
+
+/**
+ * A(10.0.0.2) — B(10.0.0.3) with an established connection and a wire whose
+ * loss model the test can swap mid-flight: `useLossRate(1)` is a dead wire,
+ * `useLossRate(0)` a perfect one. Re-plugging only affects frames sent after
+ * the call, so switching while the wire is idle gives an exact loss window.
+ */
+interface WireRig {
+  sim: Simulation;
+  bus: TraceBus;
+  client: TcpSocket;
+  server: TcpSocket;
+  useLossRate(lossRate: number): void;
+}
+
+function wireRig(
+  seed: number,
+  params: Partial<LinkParams> = {},
+  tcp: Partial<TcpSocketOptions> = {},
+  open = true,
+): WireRig {
+  const sim = new Simulation(seed);
+  const bus = new TraceBus();
+  const a = new Host(sim, "a", bus);
+  const b = new Host(sim, "b", bus);
+  const left = a.addInterface("eth0", { mac: MAC_A, ip: IP_A, mask: MASK_24 });
+  const right = b.addInterface("eth0", { mac: MAC_B, ip: IP_B, mask: MASK_24 });
+  let links = 0;
+  const plug = (lossRate: number): void => {
+    connect(
+      new Link(sim, `w${links++}`, { latencyUs: LATENCY_US, lossRate }, bus),
+      left,
+      right,
+    );
+  };
+  plug(params.lossRate ?? 0);
+  const server = new TcpSocket({
+    host: b,
+    sim,
+    initialSequence: SERVER_ISN,
+    ...tcp,
+  });
+  const client = new TcpSocket({
+    host: a,
+    sim,
+    initialSequence: CLIENT_ISN,
+    ...tcp,
+  });
+  server.listen(SERVER_PORT);
+  if (open) {
+    client.connect(IP_B, SERVER_PORT);
+    sim.runAll();
+  }
+  // Callers assert on post-handshake traffic only: those traces are drained.
+  bus.drain();
+  return { sim, bus, client, server, useLossRate: plug };
+}
+
+describe("tcp retransmission: RTO and fast retransmit (F-58)", () => {
+  const START = CLIENT_ISN + 1;
+
+  /**
+   * Deterministic search for the scenario the RTO test needs: of the four
+   * segments in the first burst exactly the *second* (an intermediate one) is
+   * lost, and nothing else is. The link's `lossRate` decides every drop from
+   * the seeded PRNG, so the search always lands on the same seed.
+   */
+  function seedWithOneLostMiddleSegment(): number {
+    for (let seed = 1; seed <= 1000; seed += 1) {
+      const { sim, bus, client } = wireRig(seed, { lossRate: 0.1 });
+      if (client.state !== "ESTABLISHED") {
+        continue;
+      }
+      client.send(patterned(4 * DEFAULT_MSS));
+      sim.runAll();
+      const lost = droppedTcp(bus.drain());
+      if (lost.length !== 1) {
+        continue;
+      }
+      const only = lost[0];
+      if (only?.seg.payload.length !== DEFAULT_MSS) {
+        continue;
+      }
+      if (only.seg.seq !== START + DEFAULT_MSS) {
+        continue;
+      }
+      return seed;
+    }
+    throw new Error("no seed dropped exactly one intermediate segment");
+  }
+
+  test("recovers a lost intermediate segment through the RTO", () => {
+    const seed = seedWithOneLostMiddleSegment();
+    const { sim, bus, client, server } = wireRig(seed, { lossRate: 0.1 });
+    const payload = patterned(4 * DEFAULT_MSS);
+    const delivered: Array<Uint8Array> = [];
+    server.onData = (data) => delivered.push(data);
+
+    client.send(payload);
+    const sentAt = sim.now;
+    expect(client.sndUna).toBe(START);
+    expect(client.sndNxt).toBe(START + payload.length);
+    sim.runAll();
+
+    const traces = bus.drain();
+    const lost = droppedTcp(traces);
+    expect(lost).toHaveLength(1);
+    const dropped = lost[0];
+    expect(dropped?.seg.seq).toBe(START + DEFAULT_MSS);
+
+    // Only two duplicate ACKs can reach the sender behind a single hole, so
+    // the recovery is the RTO: the lost bytes go out again one timeout later
+    // (base value, no backoff yet) and never before it.
+    const attempts = attemptFrames(traces, START + DEFAULT_MSS);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]?.delivered).toBe(false);
+    expect(attempts[0]?.t).toBe(sentAt);
+    expect(attempts[1]?.delivered).toBe(true);
+    expect(attempts[1]?.t).toBeGreaterThanOrEqual(sentAt + DEFAULT_RTO_US);
+    expect(attempts[1]?.t).toBeLessThanOrEqual(sentAt + 2 * DEFAULT_RTO_US);
+    expect(Array.from(attempts[1]?.seg.payload ?? [])).toEqual(
+      Array.from(dropped?.seg.payload ?? []),
+    );
+
+    // The retransmission fills the hole: every byte arrives, in order, and the
+    // sender's window drains back to SND.UNA === SND.NXT.
+    expect(joined(delivered)).toEqual(payload);
+    expect(server.read()).toEqual(payload);
+    expect(server.rcvNxt).toBe(START + payload.length);
+    expect(client.sndUna).toBe(START + payload.length);
+    expect(client.sndNxt).toBe(START + payload.length);
+    expect(client.state).toBe("ESTABLISHED");
+  });
+
+  test("fast retransmits on the third duplicate ACK, before the RTO", () => {
+    const { sim, bus, client, server, useLossRate } = wireRig(7);
+
+    // Dead wire: the burst never reaches the peer, so nothing acknowledges it
+    // and the RTO clock keeps running while the window stays stalled.
+    useLossRate(1);
+    const payload = patterned(2 * DEFAULT_MSS);
+    client.send(payload);
+    const sentAt = sim.now;
+    const original = attemptFrames(bus.drain(), START);
+    expect(original).toHaveLength(1);
+    expect(original[0]?.delivered).toBe(false);
+    expect(original[0]?.t).toBe(sentAt);
+    const firstBytes = Array.from(original[0]?.seg.payload ?? []);
+    expect(firstBytes).toEqual(Array.from(payload.subarray(0, DEFAULT_MSS)));
+    expect(client.sndUna).toBe(START);
+    expect(client.sndNxt).toBe(START + 2 * DEFAULT_MSS);
+
+    // Restore the wire so the hand-built duplicate ACKs reach the client.
+    useLossRate(0);
+    const dupAck = (): number => {
+      inject(server, client, { seq: server.sndNxt ?? 0, ack: START });
+      const arrivesAt = sim.now + LATENCY_US;
+      sim.runUntil(arrivesAt);
+      return arrivesAt;
+    };
+
+    dupAck();
+    dupAck();
+    // Two duplicates are not enough: nothing is resent and no timeout fired.
+    expect(attemptFrames(bus.drain(), START)).toHaveLength(0);
+    expect(client.rtoUs).toBe(DEFAULT_RTO_US);
+    expect(client.sndUna).toBe(START);
+
+    const thirdAckArrivesAt = dupAck();
+    const traces = bus.drain();
+    const resent = attemptFrames(traces, START);
+    expect(resent).toHaveLength(1);
+    expect(resent[0]?.delivered).toBe(true);
+    // Immediate: the resend leaves in the very event that carried the third
+    // duplicate ACK, a full RTO before the timer would have gone off.
+    expect(resent[0]?.t).toBe(thirdAckArrivesAt);
+    expect(resent[0]?.t).toBeLessThan(sentAt + DEFAULT_RTO_US);
+    // Identical bytes: same sequence number, same payload copy.
+    expect(Array.from(resent[0]?.seg.payload ?? [])).toEqual(firstBytes);
+    // Just the resend: no fast recovery, no window change, no backoff (5.5).
+    expect(client.rtoUs).toBe(DEFAULT_RTO_US);
+
+    // The peer fills the hole and the stalled segment follows on the RTO.
+    sim.runAll();
+    expect(client.sndUna).toBe(START + 2 * DEFAULT_MSS);
+    expect(server.rcvNxt).toBe(START + 2 * DEFAULT_MSS);
+    expect(server.read()).toEqual(patterned(2 * DEFAULT_MSS));
+  });
+
+  test("doubles the RTO on consecutive timeouts and resets it on an ACK", () => {
+    const { sim, bus, client, server, useLossRate } = wireRig(11);
+    const rto = DEFAULT_RTO_US;
+    const payload = patterned(DEFAULT_MSS);
+
+    // Dead wire: the retransmissions are lost too, so only the backoff can
+    // stretch the intervals between attempts.
+    useLossRate(1);
+    client.send(payload);
+    const sentAt = sim.now;
+
+    sim.runUntil(sentAt + 3 * rto + 1);
+    expect(attemptFrames(bus.drain(), START).map((frame) => frame.t)).toEqual([
+      sentAt,
+      sentAt + rto,
+      sentAt + 3 * rto,
+    ]);
+    expect(client.rtoUs).toBe(4 * rto);
+
+    // A live wire again: the fourth attempt gets through, and the ACK that
+    // advances SND.UNA puts the timer back at its base value.
+    useLossRate(0);
+    sim.runUntil(sentAt + 7 * rto + 4 * LATENCY_US);
+    const attempts = attemptFrames(bus.drain(), START);
+    expect(attempts.map((frame) => frame.t)).toEqual([sentAt + 7 * rto]);
+    expect(attempts[0]?.delivered).toBe(true);
+    expect(client.rtoUs).toBe(rto);
+    expect(client.sndUna).toBe(START + DEFAULT_MSS);
+    expect(server.read()).toEqual(payload);
+  });
+
+  test("caps the backoff at maxRtoUs", () => {
+    const { sim, bus, client, useLossRate } = wireRig(
+      5,
+      {},
+      { rtoUs: 1_000, maxRtoUs: 3_000 },
+    );
+
+    useLossRate(1);
+    client.send(patterned(DEFAULT_MSS));
+    const sentAt = sim.now;
+    sim.runUntil(sentAt + 20_000);
+
+    expect(attemptFrames(bus.drain(), START).map((frame) => frame.t)).toEqual([
+      sentAt,
+      sentAt + 1_000,
+      sentAt + 3_000,
+      sentAt + 6_000,
+      sentAt + 9_000,
+      sentAt + 12_000,
+      sentAt + 15_000,
+      sentAt + 18_000,
+    ]);
+    expect(client.rtoUs).toBe(3_000);
+    // The shipped default is a ceiling above the base, never below it.
+    expect(DEFAULT_MAX_RTO_US).toBeGreaterThan(DEFAULT_RTO_US);
+  });
+
+  test("delivers every byte under random loss, seed by seed", () => {
+    let lost = 0;
+    for (const seed of [3, 17, 29, 43]) {
+      const { sim, bus, client, server } = wireRig(seed, { lossRate: 0.05 });
+      const payload = patterned(8 * DEFAULT_MSS, seed);
+      const delivered: Array<Uint8Array> = [];
+      server.onData = (data) => delivered.push(data);
+
+      client.send(payload);
+      sim.runAll();
+      lost += droppedTcp(bus.drain()).length;
+
+      expect(client.sndUna).toBe(START + payload.length);
+      expect(client.sndNxt).toBe(START + payload.length);
+      expect(server.rcvNxt).toBe(START + payload.length);
+      expect(joined(delivered)).toEqual(payload);
+      expect(server.read()).toEqual(payload);
+      // Every transfer finished with the clock back at its base value.
+      expect(client.rtoUs).toBe(DEFAULT_RTO_US);
+    }
+    // The runs above really did lose frames, so the integrity check means it.
+    expect(lost).toBeGreaterThan(0);
+  });
+});
+
+describe("tcp retransmission of control segments (F-58)", () => {
+  test("resends a lost SYN+ACK and a lost FIN on their own RTO", () => {
+    const { sim, bus, client, server, useLossRate } = wireRig(
+      19,
+      {},
+      {},
+      false,
+    );
+    const openedAt = sim.now;
+
+    // The SYN has to resolve ARP first, so it goes out on a good wire — but the
+    // wire dies as it leaves, which loses the SYN+ACK it provokes. A listener
+    // on the trace bus is the seam: the frame is already scheduled when it
+    // fires, so only later sends see the dead wire.
+    const stop = bus.subscribe((trace) => {
+      if (trace.kind !== "frame_tx" || trace.from !== "a") {
+        return;
+      }
+      if (decodeTcp(trace.frame)?.flags.syn !== true) {
+        return;
+      }
+      useLossRate(1);
+      stop();
+    });
+    client.connect(IP_B, SERVER_PORT);
+    expect(client.state).toBe("SYN_SENT");
+
+    sim.runUntil(openedAt + 4 * LATENCY_US);
+    expect(client.state).toBe("SYN_SENT");
+    expect(server.state).toBe("SYN_RECEIVED");
+    const lostSynAck = droppedTcp(bus.drain());
+    expect(lostSynAck).toHaveLength(1);
+    expect(lostSynAck[0]?.seg.flags.syn).toBe(true);
+    expect(lostSynAck[0]?.seg.flags.ack).toBe(true);
+    const synAckAt = lostSynAck[0]?.t ?? 0;
+
+    // The server's RTO resends it, and the handshake completes on the retry.
+    useLossRate(0);
+    sim.runUntil(synAckAt + DEFAULT_RTO_US + 4 * LATENCY_US);
+    const synAcks = tcpFrames(bus.drain(), "b").filter(
+      (frame) => frame.seg.flags.syn,
+    );
+    expect(synAcks.map((frame) => frame.t)).toEqual([
+      synAckAt + DEFAULT_RTO_US,
+    ]);
+    expect(synAcks[0]?.seg.seq).toBe(SERVER_ISN);
+    expect(client.state).toBe("ESTABLISHED");
+    expect(server.state).toBe("ESTABLISHED");
+
+    // Same for the FIN: it spends sequence space like data, so it is kept and
+    // resent when the wire eats it.
+    useLossRate(1);
+    const finAt = sim.now;
+    client.close();
+    expect(client.state).toBe("FIN_WAIT_1");
+    sim.runUntil(finAt + LATENCY_US);
+    const lostFin = droppedTcp(bus.drain());
+    expect(lostFin).toHaveLength(1);
+    expect(lostFin[0]?.seg.flags.fin).toBe(true);
+
+    useLossRate(0);
+    sim.runUntil(finAt + DEFAULT_RTO_US + 4 * LATENCY_US);
+    const fins = tcpFrames(bus.drain(), "a").filter(
+      (frame) => frame.seg.flags.fin,
+    );
+    expect(fins.map((frame) => frame.t)).toEqual([finAt + DEFAULT_RTO_US]);
+    expect(fins[0]?.seg.seq).toBe(CLIENT_ISN + 1);
+    expect(server.state).toBe("CLOSE_WAIT");
+    expect(client.state).toBe("FIN_WAIT_2");
+  });
+
+  test("re-acknowledges a SYN+ACK the peer resent after a lost ACK", () => {
+    const { sim, bus, client, server } = wireRig(23);
+
+    // The peer is still in SYN_RECEIVED, so its RTO re-sends the SYN+ACK: the
+    // duplicate is answered with the ACK that completes the open.
+    inject(server, client, { seq: SERVER_ISN, ack: CLIENT_ISN + 1, syn: true });
+    sim.runUntil(sim.now + LATENCY_US);
+
+    const acks = tcpFrames(bus.drain(), "a");
+    expect(acks).toHaveLength(1);
+    expect(acks[0]?.seg.flags.syn).toBe(false);
+    expect(acks[0]?.seg.ack).toBe(SERVER_ISN + 1);
+    expect(acks[0]?.seg.payload).toHaveLength(0);
+    expect(client.state).toBe("ESTABLISHED");
+    expect(client.rcvNxt).toBe(SERVER_ISN + 1);
   });
 });

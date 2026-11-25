@@ -111,6 +111,8 @@ export {
   type VlanPortMode,
 } from "./switch";
 export {
+  DEFAULT_MAX_RTO_US,
+  DEFAULT_RTO_US,
   DEFAULT_TIME_WAIT_US,
   type TcpConnectOptions,
   TcpSocket,
