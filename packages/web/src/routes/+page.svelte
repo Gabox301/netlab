@@ -10,6 +10,16 @@ import {
   type PacketDir,
   type PacketRow,
 } from "../lib/decode";
+import {
+  compileFilter,
+  FLOW_BOTTOM,
+  FLOW_HEIGHT,
+  FLOW_TOP,
+  FLOW_WIDTH,
+  type FlowArrow,
+  flowArrows,
+  flowLanes,
+} from "../lib/filter";
 import { buildFlights, type Flight } from "../lib/flights";
 import type {
   ExecResponse,
@@ -48,6 +58,8 @@ const LINK_ENDPOINTS: Record<
 const FLIGHT_FLOOR_US = 800;
 /** Cuánto tarda el horizonte completo a 1× con el reloj continuo. */
 const PLAY_HORIZON_MS = 12_000;
+/** Ventana del flow graph: los vuelos más recientes respecto del scrubber. */
+const FLOW_WINDOW_US = 2_500;
 const BROADCAST_MAC = "ff:ff:ff:ff:ff:ff";
 /** Host the terminal tab drives; this slice keeps it fixed. */
 const TERM_HOST = "h1";
@@ -117,6 +129,8 @@ let showUdp = $state(true);
 let showDns = $state(true);
 let showDhcp = $state(true);
 let showOtro = $state(true);
+/** F-93 expression typed in the filter box; chips still AND with it. */
+let filterText = $state("");
 let hoverLayer = $state<LayerId | null>(null);
 let selectedField = $state<{ layer: LayerId; row: number } | null>(null);
 let collapsed = $state<Record<string, boolean>>({});
@@ -143,8 +157,13 @@ let playStartVirtual = 0;
 const allTraces = $derived([...(result?.traces ?? []), ...sessionTraces]);
 const traceTotal = $derived(allTraces.length);
 const packets = $derived(buildPackets(allTraces));
+const filter = $derived(compileFilter(filterText));
 const visiblePackets = $derived(
-  packets.filter((packet) => protocolVisible(packet.decoded.protocol)),
+  packets.filter(
+    (packet) =>
+      protocolVisible(packet.decoded.protocol) &&
+      (!filter.ok || filter.pred(packet)),
+  ),
 );
 const selectedPacket = $derived(
   packets.find((packet) => packet.traceIndex === selectedTraceIndex) ?? null,
@@ -193,6 +212,15 @@ const inFlights = $derived(
     return scrubUs >= flight.startUs && scrubUs <= end;
   }),
 );
+/** Carriles del flow graph, en el orden de `deviceRows` (h1, r1, h2). */
+const flowLaneRows = $derived(flowLanes(deviceRows.map((row) => row.device)));
+/** Vuelos de la ventana actual mapeados a flechas del diagrama de secuencia. */
+const flowArrowRows = $derived(
+  flowArrows(visibleFlights, flowLaneRows, {
+    fromUs: Math.max(0, scrubUs - FLOW_WINDOW_US),
+    toUs: scrubUs,
+  }),
+);
 
 function flightEndUs(flight: Flight): number {
   return Math.max(flight.endUs, flight.startUs + FLIGHT_FLOOR_US);
@@ -220,7 +248,7 @@ function flightPos(flight: Flight): { x: number; y: number } {
   return { x: ax + (bx - ax) * progress, y: ay + (by - ay) * progress };
 }
 
-function flightClass(flight: Flight): string {
+function flightClass(flight: Pick<Flight, "outcome" | "protocol">): string {
   if (flight.outcome === "dropped") {
     return "flt-dropped";
   }
@@ -238,6 +266,13 @@ function flightClass(flight: Flight): string {
     default:
       return "flt-otro";
   }
+}
+
+/** Triangles at the destination end of a flow arrow, pointing along x. */
+function arrowHead(arrow: FlowArrow): string {
+  const dir = arrow.x2 >= arrow.x1 ? 1 : -1;
+  const back = arrow.x2 - dir * 6;
+  return `${arrow.x2},${arrow.y} ${back},${arrow.y - 3} ${back},${arrow.y + 3}`;
 }
 
 /** Chip filter: every protocol has its own toggle (T7 adds expressions). */
@@ -940,6 +975,59 @@ function isNodeActive(id: string): boolean {
           <p class="hint">Esperando el run del worker…</p>
         {/if}
       </div>
+
+      <h2>Flow graph</h2>
+      <div class="pad">
+        {#if flowLaneRows.length > 0}
+          <svg
+            class="flow"
+            viewBox={`0 0 ${FLOW_WIDTH} ${FLOW_HEIGHT}`}
+            role="img"
+            aria-label="Diagrama de secuencia de los vuelos por enlace"
+          >
+            {#each flowLaneRows as lane (lane.device)}
+              <line
+                class="flow-lane"
+                x1={lane.x}
+                y1={FLOW_TOP}
+                x2={lane.x}
+                y2={FLOW_BOTTOM}
+              ></line>
+              <text class="flow-label" x={lane.x} y="14" text-anchor="middle">
+                {lane.device}
+              </text>
+            {/each}
+            {#each flowArrowRows as arrow (arrow.key)}
+              <g class="flow-arrow">
+                <title>{arrow.fromDevice} → {arrow.toDevice} · {arrow.protocol} · t={arrow.startUs} µs</title>
+                <line
+                  class={flightClass(arrow)}
+                  x1={arrow.x1}
+                  y1={arrow.y}
+                  x2={arrow.x2}
+                  y2={arrow.y}
+                ></line>
+                <circle
+                  class="flt {flightClass(arrow)}"
+                  cx={arrow.x1}
+                  cy={arrow.y}
+                  r="2"
+                ></circle>
+                <polygon
+                  class="flt {flightClass(arrow)}"
+                  points={arrowHead(arrow)}
+                ></polygon>
+              </g>
+            {/each}
+          </svg>
+          <p class="hint">
+            Vuelos de los últimos {FLOW_WINDOW_US / 1000} ms con los chips
+            activos · el borde inferior es t = {scrubUs} µs.
+          </p>
+        {:else}
+          <p class="hint">Esperando el run del worker…</p>
+        {/if}
+      </div>
     </section>
 
     <section class="col packets-col" aria-label="Paquetes">
@@ -990,6 +1078,34 @@ function isNodeActive(id: string): boolean {
           </button>
         </span>
       </h2>
+
+      <div class="filter-bar">
+        <label class="filter-lbl" for="filter-expr">filtro</label>
+        <input
+          id="filter-expr"
+          class="filter-input"
+          type="text"
+          bind:value={filterText}
+          placeholder="ip.src == 10.0.0.2 && udp.dport == 53"
+          aria-invalid={filter.ok ? "false" : "true"}
+          aria-describedby={filter.ok ? undefined : "filter-error"}
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+          aria-label="Filtro por expresión"
+        />
+        {#if filter.ok}
+          <p class="filter-hint">
+            {filterText.trim() === ""
+              ? "chips activos · sin expresión"
+              : `${visiblePackets.length} de ${packets.length} frames`}
+          </p>
+        {:else}
+          <p id="filter-error" class="filter-error" role="alert">
+            {filter.error.message} · posición {filter.error.position}
+          </p>
+        {/if}
+      </div>
 
       {#if error}
         <p class="error" role="alert">{error}</p>
@@ -1585,6 +1701,56 @@ function isNodeActive(id: string): boolean {
     fill: var(--bad);
   }
 
+  .flow {
+    width: 100%;
+    height: auto;
+    display: block;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    margin-bottom: 6px;
+  }
+
+  .flow-lane {
+    stroke: var(--line);
+    stroke-width: 1;
+    stroke-dasharray: 2 3;
+  }
+
+  .flow-label {
+    fill: var(--mut);
+    font: 11px var(--mono);
+  }
+
+  .flow-arrow line {
+    stroke-width: 1.5;
+  }
+
+  .flow-arrow line.flt-arp {
+    stroke: var(--warn);
+  }
+
+  .flow-arrow line.flt-icmp {
+    stroke: var(--ok);
+  }
+
+  .flow-arrow line.flt-udp {
+    stroke: var(--l4);
+  }
+
+  .flow-arrow line.flt-dns {
+    stroke: var(--l7);
+  }
+
+  .flow-arrow line.flt-dhcp,
+  .flow-arrow line.flt-otro {
+    stroke: var(--mut);
+  }
+
+  .flow-arrow line.flt-dropped {
+    stroke: var(--bad);
+    stroke-dasharray: 3 2;
+  }
+
   .devices {
     width: 100%;
     border-collapse: collapse;
@@ -1624,6 +1790,59 @@ function isNodeActive(id: string): boolean {
   .chips button[aria-pressed="true"] {
     border-color: var(--acc);
     color: var(--acc);
+  }
+
+  .filter-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0 14px 10px;
+  }
+
+  .filter-lbl {
+    color: var(--mut);
+    font: 11px var(--mono);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+
+  .filter-input {
+    flex: 1;
+    min-width: 170px;
+    background: var(--code);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    font: 12px var(--mono);
+    padding: 6px 9px;
+  }
+
+  .filter-input::placeholder {
+    color: var(--dim);
+  }
+
+  .filter-input:focus {
+    border-color: var(--acc);
+    outline: none;
+  }
+
+  .filter-input[aria-invalid="true"] {
+    border-color: var(--bad);
+  }
+
+  .filter-error,
+  .filter-hint {
+    flex-basis: 100%;
+    margin: 0;
+    font: 12px var(--mono);
+  }
+
+  .filter-error {
+    color: var(--bad);
+  }
+
+  .filter-hint {
+    color: var(--dim);
   }
 
   .table-wrap {

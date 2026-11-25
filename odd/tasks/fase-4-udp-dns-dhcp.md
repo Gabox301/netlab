@@ -15,7 +15,7 @@ Slice vertical ODD sobre netlab-roadmap.md § Fase 4. Sin atajos: parsers totale
 - [x] T4 (S1) Shell+inspector: `dig`, `dhclient`, `nc -u` en shell + capas/protocolo UDP/DNS/DHCP en `decode.ts`, `flights.ts` y `+page.svelte` (chips y colores; expresión y flow graph → T7).
 - [x] T5 (S1) Integración: fixture `cli/test/dhcp-dns.test.ts` (host sin IP → `dhclient` → `dig`; misma subred + ruteado).
 - [x] T6 (S1) DHCP renewal/rebind + expiración (T1=50% unicast, T2=87.5% broadcast, NAK→discover, expiración→0.0.0.0; `autoRenew` off por default).
-- [ ] T7 (S1) F-93 filtro por expresión + F-95 flow graph (T4 solo deja chips por protocolo + capas). Commit.
+- [x] T7 (S1) F-93 filtro por expresión + F-95 flow graph (parser total && || ! paréntesis; flow con carriles h1/r1/h2 y flechas por vuelo).
 
 ## Log
 
