@@ -24,6 +24,13 @@
  * Destination Unreachable / Port Unreachable. Ephemeral source ports come
  * from `sim.random`, never `Math.random()`.
  *
+ * TCP (F-53 to F-55) reuses that shape without any connection state here:
+ * `bindTcp()` reserves a port (`onTcpSegment` is the fallback for ports bound
+ * without their own handler), `sendTcpSegment()` transmits an already
+ * serialized segment through the normal route, and a segment for an unbound
+ * port is answered with a RST built from its sequence numbers. The state
+ * machine itself lives in `tcp.ts`, never in this file.
+ *
  * Cache discipline: every ARP packet refreshes `senderIp -> senderMac`, which
  * covers gratuitous announcements and lets a request resolve a pending entry
  * for the sender. A pending entry owns one retry timer: retries + 1 requests,
@@ -44,6 +51,7 @@ import {
   ICMP_TYPE_ECHO_REQUEST,
   type IcmpMessage,
   IPV4_PROTOCOL_ICMP,
+  IPV4_PROTOCOL_TCP,
   IPV4_PROTOCOL_UDP,
   IPV4_VERSION,
   type Ipv4Packet,
@@ -51,13 +59,17 @@ import {
   parseEthernet,
   parseIcmp,
   parseIpv4,
+  parseTcp,
   parseUdp,
   serializeArp,
   serializeEthernet,
   serializeIcmp,
   serializeIpv4,
+  serializeTcp,
   serializeUdp,
   shouldAccept,
+  type TcpFlags,
+  type TcpSegment,
 } from "@netlab/protocols";
 import {
   Device,
@@ -191,6 +203,40 @@ export interface HostUdpSendHandle {
   srcPort: number;
 }
 
+/** A TCP segment delivered to a listener, as reported by `bindTcp`. */
+export interface HostTcpSegment {
+  iface: string;
+  srcIp: string;
+  dstIp: string;
+  srcPort: number;
+  dstPort: number;
+  /** Decoded segment; `payload` is a copy owned by the receiver. */
+  segment: TcpSegment;
+}
+
+/** Listener for one bound TCP port (or the `onTcpSegment` fallback). */
+export type HostTcpHandler = (segment: HostTcpSegment) => void;
+
+/** A bound TCP port. */
+export interface HostTcpSocket {
+  readonly port: number;
+  /** Release the port so the next segment for it answers RST. Idempotent. */
+  close(): void;
+}
+
+/** Options for `Host.sendTcpSegment()`. */
+export interface HostTcpSendOptions {
+  /** Egress interface; default the configured route/gateway. */
+  iface?: string;
+  /** IPv4 source (and pseudo-header address); default the route's address. */
+  srcIp?: string;
+}
+
+/** Result of queueing one TCP segment. */
+export interface HostTcpSendHandle {
+  iface: string;
+}
+
 /** Result of queueing one Echo Request. */
 export interface HostPingHandle {
   iface: string;
@@ -252,6 +298,8 @@ export interface HostOptions {
   onIcmpError?: (error: HostIcmpError) => void;
   /** Initial fallback listener for UDP sockets bound without a handler. */
   onUdp?: HostUdpHandler;
+  /** Initial fallback listener for TCP ports bound without a handler. */
+  onTcpSegment?: HostTcpHandler;
   /** How long partial inbound datagrams stay buffered. */
   reassemblyTimeoutUs?: number;
   /** Fragment-payload memory budget for inbound reassembly. */
@@ -279,6 +327,11 @@ interface ArpEntry {
 /** A bound UDP port and its optional per-port listener. */
 interface UdpSocketEntry {
   handler: HostUdpHandler | undefined;
+}
+
+/** A reserved TCP port and its optional per-port listener. */
+interface TcpSocketEntry {
+  handler: HostTcpHandler | undefined;
 }
 
 /** Interface plus its addressing state. */
@@ -353,6 +406,8 @@ export class Host extends Device {
   onIcmpError: ((error: HostIcmpError) => void) | undefined = undefined;
   /** Fallback listener for UDP sockets bound without their own handler. */
   onUdp: HostUdpHandler | undefined = undefined;
+  /** Fallback listener for TCP ports bound without their own handler. */
+  onTcpSegment: HostTcpHandler | undefined = undefined;
 
   private readonly arpTtlUs: number;
   private readonly arpTimeoutUs: number;
@@ -362,6 +417,7 @@ export class Host extends Device {
   private readonly reassembler: Reassembler;
   private readonly pendingPings = new Map<string, number>();
   private readonly udpSockets = new Map<number, UdpSocketEntry>();
+  private readonly tcpSockets = new Map<number, TcpSocketEntry>();
   private ipId = 1;
   private pingSequence = 0;
   private udpEphemeralNext: number | undefined = undefined;
@@ -393,6 +449,7 @@ export class Host extends Device {
     this.onEchoReply = opts.onEchoReply;
     this.onIcmpError = opts.onIcmpError;
     this.onUdp = opts.onUdp;
+    this.onTcpSegment = opts.onTcpSegment;
     const reassembly: ReassemblyOptions = {
       onExpire: (expiry) =>
         this.log(
@@ -668,6 +725,80 @@ export class Host extends Device {
       {},
     );
     return { iface: path.cfg.iface.name, srcPort };
+  }
+
+  /**
+   * Reserve a TCP port so inbound segments are delivered instead of answered
+   * with RST (F-54).
+   *
+   * Segments go to `handler`; a port reserved without one falls back to
+   * `onTcpSegment`. A second reservation of the same port throws, and
+   * `close()` releases it (idempotent). The connection state machine lives in
+   * `tcp.ts`: this host only owns the port namespace.
+   */
+  bindTcp(port: number, handler?: HostTcpHandler): HostTcpSocket {
+    checkU16Field("port", port);
+    if (this.tcpSockets.has(port)) {
+      throw new Error(`${this.id}: TCP port ${port} is already bound`);
+    }
+    const entry: TcpSocketEntry = { handler };
+    this.tcpSockets.set(port, entry);
+    return {
+      port,
+      close: (): void => {
+        if (this.tcpSockets.get(port) === entry) {
+          this.tcpSockets.delete(port);
+        }
+      },
+    };
+  }
+
+  /**
+   * Send one already serialized TCP segment through the configured route (or
+   * `opts.iface`).
+   *
+   * `opts.srcIp` overrides the IPv4 source and therefore the pseudo-header
+   * the caller used for the checksum. Throws synchronously on routing/ARP
+   * setup errors, exactly like `sendTo()`.
+   */
+  sendTcpSegment(
+    destIp: string,
+    segment: Uint8Array,
+    opts: HostTcpSendOptions = {},
+  ): HostTcpSendHandle {
+    const destination = Ipv4Address.parse(destIp);
+    // Select the path before touching any state so a routing error is a
+    // plain synchronous throw with nothing queued (same contract as sendTo).
+    const path = this.interfaceFor(destination, opts.iface);
+    const source =
+      opts.srcIp === undefined ? undefined : Ipv4Address.parse(opts.srcIp);
+    this.emitIpv4(
+      path.cfg,
+      destination,
+      IPV4_PROTOCOL_TCP,
+      segment,
+      path.nextHop,
+      {},
+      source,
+    );
+    return { iface: path.cfg.iface.name };
+  }
+
+  /**
+   * Source address the configured route to `destIp` would use.
+   *
+   * Callers that build their own transport checksum (the TCP machine) need
+   * the same address `emitIpv4()` will put in the pseudo-header.
+   */
+  routeSourceIp(destIp: string, ifaceName?: string): Ipv4Address {
+    const path = this.interfaceFor(Ipv4Address.parse(destIp), ifaceName);
+    const ip = path.cfg.ip;
+    if (ip === undefined) {
+      throw new Error(
+        `${this.id}:${path.cfg.iface.name}: no IPv4 address configured`,
+      );
+    }
+    return ip;
   }
 
   /** Transmit a frame with an explicit destination MAC, bypassing ARP. */
@@ -957,6 +1088,10 @@ export class Host extends Device {
       this.receiveUdp(iface, packet);
       return;
     }
+    if (packet.header.protocol === IPV4_PROTOCOL_TCP) {
+      this.receiveTcp(iface, packet);
+      return;
+    }
     if (packet.header.protocol !== IPV4_PROTOCOL_ICMP) {
       return;
     }
@@ -1110,6 +1245,124 @@ export class Host extends Device {
         `${this.id}:${iface.name}`,
         "warn",
         `cannot answer UDP port ${port} from ${source}: ${errorMessage(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Demultiplex one TCP segment by destination port (F-54).
+   *
+   * A reserved port takes the segment (its own handler, else the
+   * `onTcpSegment` fallback); a segment for no reserved port is answered with
+   * RST and never delivered to the fallback hook. Malformed segments
+   * (including bad checksums) are logged and dropped.
+   */
+  private receiveTcp(iface: NetworkInterface, packet: Ipv4Packet): void {
+    const header = packet.header;
+    const parsed = parseTcp(packet.payload, {
+      src: header.src,
+      dst: header.dst,
+    });
+    if (!parsed.ok) {
+      this.log(
+        `${this.id}:${iface.name}`,
+        "warn",
+        `dropped TCP ${header.src} -> ${header.dst}: ${parsed.error.message}`,
+      );
+      return;
+    }
+    const segment = parsed.value;
+    const socket = this.tcpSockets.get(segment.dstPort);
+    if (socket === undefined) {
+      this.sendTcpReset(iface, packet, segment);
+      return;
+    }
+    const handler = socket.handler ?? this.onTcpSegment;
+    if (handler === undefined) {
+      this.log(
+        `${this.id}:${iface.name}`,
+        "warn",
+        `TCP port ${segment.dstPort} is bound without a handler: dropped ` +
+          `seq=${segment.seq} from ${header.src}:${segment.srcPort}`,
+      );
+      return;
+    }
+    handler({
+      iface: iface.name,
+      srcIp: header.src.toString(),
+      dstIp: header.dst.toString(),
+      srcPort: segment.srcPort,
+      dstPort: segment.dstPort,
+      segment,
+    });
+  }
+
+  /**
+   * Answer a segment for a closed port with RST (RFC 9293 §3.10.7.1).
+   *
+   * A segment without ACK (a SYN, typically) earns `RST|ACK` whose ack covers
+   * the sequence space it consumed; a segment that carried ACK earns a bare
+   * RST that echoes that ACK as its own sequence number. RSTs are never
+   * answered, and routing failures are logged, not thrown out of the receive
+   * path.
+   */
+  private sendTcpReset(
+    iface: NetworkInterface,
+    offending: Ipv4Packet,
+    segment: TcpSegment,
+  ): void {
+    if (segment.flags.rst) {
+      return;
+    }
+    const ingress = this.portOf(iface.name);
+    if (ingress.ip === undefined) {
+      return;
+    }
+    const source = offending.header.src;
+    const consumed =
+      segment.payload.length +
+      (segment.flags.syn ? 1 : 0) +
+      (segment.flags.fin ? 1 : 0);
+    const acked = segment.flags.ack;
+    const flags: TcpFlags = {
+      fin: false,
+      syn: false,
+      rst: true,
+      psh: false,
+      ack: !acked,
+      urg: false,
+    };
+    const reset = serializeTcp(
+      {
+        srcPort: segment.dstPort,
+        dstPort: segment.srcPort,
+        seq: acked ? segment.ack : 0,
+        ack: acked ? 0 : (segment.seq + consumed) >>> 0,
+        flags,
+        window: 0,
+        urgent: 0,
+        payload: new Uint8Array(0),
+      },
+      ingress.ip,
+      source,
+    );
+    try {
+      const path = this.interfaceFor(source);
+      this.emitIpv4(
+        path.cfg,
+        source,
+        IPV4_PROTOCOL_TCP,
+        reset,
+        path.nextHop,
+        {},
+        ingress.ip,
+      );
+    } catch (err) {
+      this.log(
+        `${this.id}:${iface.name}`,
+        "warn",
+        `cannot answer closed TCP port ${segment.dstPort} from ${source}: ` +
+          `${errorMessage(err)}`,
       );
     }
   }

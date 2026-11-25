@@ -55,6 +55,11 @@ export {
   type HostPayloadHandler,
   type HostPingHandle,
   type HostPingOptions,
+  type HostTcpHandler,
+  type HostTcpSegment,
+  type HostTcpSendHandle,
+  type HostTcpSendOptions,
+  type HostTcpSocket,
 } from "./host";
 export {
   type BurstLoss,
@@ -105,6 +110,13 @@ export {
   type VlanPortConfig,
   type VlanPortMode,
 } from "./switch";
+export {
+  DEFAULT_TIME_WAIT_US,
+  type TcpConnectOptions,
+  TcpSocket,
+  type TcpSocketOptions,
+  type TcpState,
+} from "./tcp";
 export {
   type DropReason,
   type EndpointId,

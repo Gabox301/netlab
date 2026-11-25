@@ -124,6 +124,13 @@ export {
   serializeIpv4,
 } from "./ipv4";
 export {
+  parseTcp,
+  serializeTcp,
+  TCP_HEADER_LENGTH,
+  type TcpFlags,
+  type TcpSegment,
+} from "./tcp";
+export {
   parseUdp,
   serializeUdp,
   UDP_HEADER_LENGTH,
