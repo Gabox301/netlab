@@ -9,6 +9,7 @@ import {
   type PacketDir,
   type PacketRow,
 } from "../lib/decode";
+import { buildFlights, type Flight } from "../lib/flights";
 import type {
   ExecResponse,
   InterfaceSnapshot,
@@ -35,6 +36,17 @@ const LINK_MIDPOINTS: Record<string, { x: number; y: number }> = {
   "l-h1-r1": { x: 113, y: 110 },
   "l-r1-h2": { x: 187, y: 110 },
 };
+const LINK_ENDPOINTS: Record<
+  string,
+  { ax: number; ay: number; bx: number; by: number }
+> = {
+  "l-h1-r1": { ax: 76, ay: 96, bx: 150, by: 124 },
+  "l-r1-h2": { ax: 150, ay: 124, bx: 224, by: 96 },
+};
+/** Piso visual para que un vuelo de 10 µs se vea; el tiempo virtual no cambia. */
+const FLIGHT_FLOOR_US = 800;
+/** Cuánto tarda el horizonte completo a 1× con el reloj continuo. */
+const PLAY_HORIZON_MS = 12_000;
 const BROADCAST_MAC = "ff:ff:ff:ff:ff:ff";
 /** Host the terminal tab drives; this slice keeps it fixed. */
 const TERM_HOST = "h1";
@@ -59,8 +71,43 @@ let paused = $state(true);
 const SPEEDS: ReadonlyArray<number> = [0.5, 1, 2, 4];
 let speedIdx = $state(1);
 
-function playInterval(): number {
-  return Math.round(900 / (SPEEDS[speedIdx] ?? 1));
+function clockRate(): number {
+  return (horizonUs / PLAY_HORIZON_MS) * (SPEEDS[speedIdx] ?? 1);
+}
+
+function startClock(fromUs: number): void {
+  stopTimer();
+  paused = false;
+  playStartVirtual = fromUs;
+  playStartWall = performance.now();
+  raf = requestAnimationFrame(tick);
+}
+
+function tick(now: number): void {
+  if (paused) {
+    return;
+  }
+  const elapsed = now - playStartWall;
+  scrubUs = Math.min(playStartVirtual + elapsed * clockRate(), horizonUs);
+  syncSelectionToClock();
+  if (scrubUs >= horizonUs) {
+    stopTimer();
+    paused = true;
+    return;
+  }
+  raf = requestAnimationFrame(tick);
+}
+
+function syncSelectionToClock(): void {
+  let chosen: PacketRow | null = null;
+  for (const packet of packets) {
+    if (packet.t <= scrubUs) {
+      chosen = packet;
+    }
+  }
+  if ((chosen?.traceIndex ?? -1) !== selectedTraceIndex) {
+    setSelectedTrace(chosen?.traceIndex ?? -1);
+  }
 }
 let tab = $state<TabId>("inspector");
 let showArp = $state(true);
@@ -84,6 +131,9 @@ let termCursor = -1;
 
 let worker: Worker | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
+let raf: number | null = null;
+let playStartWall = 0;
+let playStartVirtual = 0;
 
 /** Run traces plus everything the terminal produced, in arrival order. */
 const allTraces = $derived([...(result?.traces ?? []), ...sessionTraces]);
@@ -138,9 +188,63 @@ const toDevice = $derived(
     ? (deviceByMac.get(selectedPacket.decoded.dstMac) ?? null)
     : null,
 );
-const dotPosition = $derived(
-  activeLink ? (LINK_MIDPOINTS[activeLink] ?? null) : null,
+const flights = $derived(buildFlights(allTraces));
+const visibleFlights = $derived(
+  flights.filter((flight) => {
+    if (flight.protocol === "ARP") {
+      return showArp;
+    }
+    if (flight.protocol === "ICMP") {
+      return showIcmp;
+    }
+    return showOtro;
+  }),
 );
+const inFlights = $derived(
+  visibleFlights.filter((flight) => {
+    const end = Math.max(flight.endUs, flight.startUs + FLIGHT_FLOOR_US);
+    return scrubUs >= flight.startUs && scrubUs <= end;
+  }),
+);
+
+function flightEndUs(flight: Flight): number {
+  return Math.max(flight.endUs, flight.startUs + FLIGHT_FLOOR_US);
+}
+
+function flightProgress(flight: Flight): number {
+  const end = flightEndUs(flight);
+  if (end <= flight.startUs) {
+    return 1;
+  }
+  const progress = (scrubUs - flight.startUs) / (end - flight.startUs);
+  return Math.min(Math.max(progress, 0), 1);
+}
+
+function flightPos(flight: Flight): { x: number; y: number } {
+  const seg = LINK_ENDPOINTS[flight.linkId];
+  if (!seg) {
+    return LINK_MIDPOINTS[flight.linkId] ?? { x: 0, y: 0 };
+  }
+  const progress = flightProgress(flight);
+  const ax = flight.from === "a" ? seg.ax : seg.bx;
+  const ay = flight.from === "a" ? seg.ay : seg.by;
+  const bx = flight.from === "a" ? seg.bx : seg.ax;
+  const by = flight.from === "a" ? seg.by : seg.ay;
+  return { x: ax + (bx - ax) * progress, y: ay + (by - ay) * progress };
+}
+
+function flightClass(flight: Flight): string {
+  if (flight.outcome === "dropped") {
+    return "flt-dropped";
+  }
+  if (flight.protocol === "ARP") {
+    return "flt-arp";
+  }
+  if (flight.protocol === "ICMP") {
+    return "flt-icmp";
+  }
+  return "flt-otro";
+}
 const hexLines = $derived(
   selectedPacket
     ? buildHexLines(selectedPacket.decoded.hex, selectedPacket.decoded.layers)
@@ -376,6 +480,10 @@ function stopTimer(): void {
     clearInterval(timer);
     timer = null;
   }
+  if (raf !== null) {
+    cancelAnimationFrame(raf);
+    raf = null;
+  }
 }
 
 function selectPacket(packet: PacketRow): void {
@@ -402,29 +510,13 @@ function playFromList(list: PacketRow[], index: number): void {
   if (target === undefined) {
     return;
   }
-  stopTimer();
-  paused = false;
-  selectPacket(target);
-  timer = setInterval(advance, playInterval());
+  setSelectedTrace(target.traceIndex);
+  scrubUs = target.t;
+  startClock(target.t);
 }
 
 function advance(): void {
-  const list = packets;
-  if (list.length === 0) {
-    stopTimer();
-    paused = true;
-    return;
-  }
-  const index = list.findIndex(
-    (packet) => packet.traceIndex === selectedTraceIndex,
-  );
-  const next = list[index + 1];
-  if (next === undefined) {
-    stopTimer();
-    paused = true;
-    return;
-  }
-  selectPacket(next);
+  step(1);
 }
 
 function togglePause(): void {
@@ -436,14 +528,18 @@ function togglePause(): void {
     paused = true;
     return;
   }
-  const list = packets;
-  if (list.length === 0) {
+  if (packets.length === 0) {
     return;
   }
-  const index = list.findIndex(
-    (packet) => packet.traceIndex === selectedTraceIndex,
-  );
-  playFromList(list, Math.max(index, 0));
+  if (scrubUs >= horizonUs) {
+    const first = packets[0];
+    if (first !== undefined) {
+      setSelectedTrace(first.traceIndex);
+    }
+    startClock(0);
+    return;
+  }
+  startClock(scrubUs);
 }
 
 function step(dir: 1 | -1): void {
@@ -477,15 +573,11 @@ function restart(): void {
 }
 
 function onSpeedChange(event: Event): void {
-  speedIdx = Number(event.currentTarget.value);
+  speedIdx = Number((event.currentTarget as HTMLSelectElement).value);
   if (paused || result === null) {
     return;
   }
-  const list = packets;
-  const index = list.findIndex(
-    (packet) => packet.traceIndex === selectedTraceIndex,
-  );
-  playFromList(list, Math.max(index, 0));
+  startClock(scrubUs);
 }
 
 function onReplayKey(event: KeyboardEvent): void {
@@ -793,14 +885,17 @@ function isNodeActive(id: string): boolean {
             <text class="ns" x="224" y="82" text-anchor="middle">10.0.1.2</text>
           </g>
 
-          {#if dotPosition}
+          {#each inFlights as flight (flight.linkId + ":" + flight.from + ":" + flight.startUs + ":" + flight.endUs)}
+            {@const pos = flightPos(flight)}
             <circle
-              class="pkt"
-              cx={dotPosition.x}
-              cy={dotPosition.y}
+              class="flt {flightClass(flight)}"
+              cx={pos.x}
+              cy={pos.y}
               r="5"
-            ></circle>
-          {/if}
+            >
+              <title>{flight.protocol} {flight.linkId}</title>
+            </circle>
+          {/each}
         </svg>
       </div>
 
@@ -1411,10 +1506,25 @@ function isNodeActive(id: string): boolean {
     font: 11px var(--mono);
   }
 
-  .pkt {
-    fill: var(--ok);
+  .flt {
     stroke: var(--bg);
     stroke-width: 1.5;
+  }
+
+  .flt-arp {
+    fill: var(--warn);
+  }
+
+  .flt-icmp {
+    fill: var(--ok);
+  }
+
+  .flt-otro {
+    fill: var(--mut);
+  }
+
+  .flt-dropped {
+    fill: var(--bad);
   }
 
   .devices {
