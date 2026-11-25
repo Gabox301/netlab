@@ -48,6 +48,14 @@ import {
   topologyFromJson,
   topologyToScenarioJson,
 } from "../../lib/topology";
+import {
+  type CanvasView,
+  panPx,
+  resetView,
+  viewBoxOf,
+  zoomAt,
+  zoomAtPoint,
+} from "../../lib/view";
 
 type Selection =
   | { kind: "node"; name: string }
@@ -117,6 +125,19 @@ let pending = $state<TopologyEndpoint | null>(null);
 let cableCursor = $state<{ x: number; y: number } | null>(null);
 let paletteDrag = $state<PaletteDrag | null>(null);
 let nodeDrag = $state<NodeDrag | null>(null);
+/**
+ * Transient viewport over the 1440x900 world. Like `tool`, it never enters the
+ * history: undo/redo/load leave it alone.
+ */
+let view = $state<CanvasView>(resetView());
+let canvasPan = $state<{
+  pointerId: number;
+  startX: number;
+  startY: number;
+  lastX: number;
+  lastY: number;
+  moved: boolean;
+} | null>(null);
 let notice = $state<Notice>({
   kind: "info",
   text: "Ejemplo cargado: h1 → r1 → h2/h3 con ping. Exportá el JSON y corré netlab run.",
@@ -436,6 +457,28 @@ function onPaletteClick(event: MouseEvent, kind: DeviceKind): void {
 }
 
 function onWindowPointerMove(event: PointerEvent): void {
+  const pan = canvasPan;
+  if (pan !== null) {
+    if (event.pointerId !== pan.pointerId) {
+      return;
+    }
+    const rect = svgEl?.getBoundingClientRect();
+    if (!rect) {
+      return;
+    }
+    const dx = event.clientX - pan.lastX;
+    const dy = event.clientY - pan.lastY;
+    if (
+      !pan.moved &&
+      Math.hypot(event.clientX - pan.startX, event.clientY - pan.startY) > 4
+    ) {
+      pan.moved = true;
+    }
+    view = panPx(view, rect.width, rect.height, dx, dy);
+    pan.lastX = event.clientX;
+    pan.lastY = event.clientY;
+    return;
+  }
   if (paletteDrag !== null) {
     if (event.pointerId !== paletteDrag.pointerId) {
       return;
@@ -470,6 +513,17 @@ function onWindowPointerMove(event: PointerEvent): void {
 }
 
 function onWindowPointerUp(event: PointerEvent): void {
+  if (canvasPan !== null && event.pointerId === canvasPan.pointerId) {
+    if (!canvasPan.moved) {
+      // A plain click (no pan) on the canvas clears the selection.
+      pending = null;
+      cableCursor = null;
+      selection = null;
+      extraSelected = [];
+    }
+    canvasPan = null;
+    return;
+  }
   if (paletteDrag !== null && event.pointerId === paletteDrag.pointerId) {
     const drag = paletteDrag;
     paletteDrag = null;
@@ -504,11 +558,23 @@ function onCanvasPointerMove(event: PointerEvent): void {
   }
 }
 
-function onCanvasPointerDown(): void {
-  pending = null;
-  cableCursor = null;
-  selection = null;
-  extraSelected = [];
+function onCanvasPointerDown(event: PointerEvent): void {
+  if (tool !== "select") {
+    pending = null;
+    cableCursor = null;
+    selection = null;
+    extraSelected = [];
+    return;
+  }
+  // Selecting: the click may turn into a pan, so deselect on pointerup.
+  canvasPan = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    lastX: event.clientX,
+    lastY: event.clientY,
+    moved: false,
+  };
 }
 
 /**
@@ -703,6 +769,38 @@ function setSelectTool(): void {
   cableCursor = null;
 }
 
+/** Zoom around the middle of the canvas (keyboard and toolbar zoom). */
+function zoomCenter(factor: number): void {
+  view = zoomAt(view, 0.5, 0.5, factor);
+}
+
+function resetZoom(): void {
+  view = resetView();
+}
+
+/** Wheel zoom needs a non-passive listener, so hook it up by hand. */
+$effect(() => {
+  const el = svgEl;
+  if (el === null) {
+    return;
+  }
+  const onWheel = (event: WheelEvent): void => {
+    event.preventDefault();
+    const rect = el.getBoundingClientRect();
+    const dy = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+    view = zoomAtPoint(
+      view,
+      rect.width,
+      rect.height,
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      Math.exp(-dy * 0.002),
+    );
+  };
+  el.addEventListener("wheel", onWheel, { passive: false });
+  return () => el.removeEventListener("wheel", onWheel);
+});
+
 function onWindowKeyDown(event: KeyboardEvent): void {
   const mod = event.ctrlKey || event.metaKey;
   if (mod && (event.key === "z" || event.key === "Z")) {
@@ -763,6 +861,29 @@ function onWindowKeyDown(event: KeyboardEvent): void {
     onPasteClipboard();
     return;
   }
+  if (!mod) {
+    // Zoom keys stay native inside the form fields, like the mod shortcuts.
+    const target = event.target;
+    const inField =
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement;
+    if (!inField && (event.key === "+" || event.key === "=")) {
+      event.preventDefault();
+      zoomCenter(1.25);
+      return;
+    }
+    if (!inField && event.key === "-") {
+      event.preventDefault();
+      zoomCenter(1 / 1.25);
+      return;
+    }
+    if (!inField && event.key === "0") {
+      event.preventDefault();
+      resetZoom();
+      return;
+    }
+  }
   if (event.key !== "Escape") {
     return;
   }
@@ -779,6 +900,10 @@ function onWindowKeyDown(event: KeyboardEvent): void {
   }
   if (nodeDrag !== null) {
     nodeDrag = null;
+    return;
+  }
+  if (canvasPan !== null) {
+    canvasPan = null;
     return;
   }
   if (tool === "cable") {
@@ -1266,7 +1391,7 @@ function exportJson(): void {
       bind:this={svgEl}
       class="canvas"
       class:connecting={tool === "cable"}
-      viewBox={`0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}`}
+      viewBox={viewBoxOf(view)}
       preserveAspectRatio="xMidYMid meet"
       role="group"
       aria-label="Lienzo de topología: arrastrá dispositivos y conectá interfaces"
@@ -1482,6 +1607,33 @@ function exportJson(): void {
         onclick={onPasteClipboard}
       >
         <span class="glyph" aria-hidden="true">❐</span><small>paste</small>
+      </button>
+      <button
+        type="button"
+        class="tool"
+        title="Acercar (rueda o +)"
+        aria-label="Acercar"
+        onclick={() => zoomCenter(1.25)}
+      >
+        <span class="glyph" aria-hidden="true">+</span><small>in</small>
+      </button>
+      <button
+        type="button"
+        class="tool"
+        title="Alejar (rueda o -)"
+        aria-label="Alejar"
+        onclick={() => zoomCenter(1 / 1.25)}
+      >
+        <span class="glyph" aria-hidden="true">−</span><small>out</small>
+      </button>
+      <button
+        type="button"
+        class="tool"
+        title="Vista 100% (0)"
+        aria-label="Restablecer vista"
+        onclick={resetZoom}
+      >
+        <span class="glyph" aria-hidden="true">⤾</span><small>1:1</small>
       </button>
     </nav>
 
@@ -2445,6 +2597,8 @@ function exportJson(): void {
     flex-direction: column;
     gap: 8px;
     padding: 10px;
+    max-height: calc(100% - 32px);
+    overflow-y: auto;
     background: var(--card);
     border: 1px solid var(--line);
     z-index: 4;
