@@ -1748,3 +1748,212 @@ describe("tcp congestion control: Reno (F-59)", () => {
     expect(client.sndUna).toBe(CLIENT_ISN + 1 + payload.length);
   });
 });
+
+/**
+ * Accept queue (F-61). A listening socket with `backlog > 1` stays in LISTEN
+ * and forks one child per handshake into `pendingAccepts`; `backlog === 1`
+ * keeps the historical single-connection path and queues the listener itself.
+ * A SYN that finds no room is discarded (never answered with a RST), so the
+ * peer retries on its own RTO.
+ */
+describe("tcp accept queue (F-61)", () => {
+  const ACCEPT_PORT = 8080;
+
+  test("keeps the listener in LISTEN and queues one ESTABLISHED child per connection", () => {
+    const { sim, a, b } = directLink(51);
+    const listener = new TcpSocket({ host: b, sim, backlog: 2 });
+    const accepted: Array<TcpSocket> = [];
+    listener.onAccept = (socket) => accepted.push(socket);
+    listener.listen(ACCEPT_PORT);
+    expect(listener.accept()).toBeUndefined();
+
+    const firstClient = new TcpSocket({ host: a, sim, initialSequence: 3000 });
+    const secondClient = new TcpSocket({ host: a, sim, initialSequence: 4000 });
+    firstClient.connect(IP_B, ACCEPT_PORT, { localPort: 30001 });
+    secondClient.connect(IP_B, ACCEPT_PORT, { localPort: 30002 });
+    sim.runAll();
+
+    expect(listener.state).toBe("LISTEN");
+    const queued = listener.pendingAccepts;
+    expect(queued).toHaveLength(2);
+    for (const socket of queued) {
+      expect(socket.state).toBe("ESTABLISHED");
+      expect(socket.localPort).toBe(ACCEPT_PORT);
+      expect(socket.remoteIp).toBe(IP_A);
+    }
+    expect(queued.map((socket) => socket.remotePort).sort()).toEqual([
+      30001, 30002,
+    ]);
+    // `onAccept` is the notification seam and sees the same children.
+    expect(accepted).toEqual([...queued]);
+
+    // accept() dequeues FIFO: the oldest connection first, never twice.
+    expect(listener.accept()).toBe(queued[0]);
+    expect(listener.accept()).toBe(queued[1]);
+    expect(listener.accept()).toBeUndefined();
+    expect(listener.pendingAccepts).toHaveLength(0);
+    expect(listener.state).toBe("LISTEN");
+  });
+
+  test("delivers payload carried by the ACK that completes the handshake", () => {
+    const { sim, a, b } = directLink(61);
+    const server = new TcpSocket({ host: b, sim, initialSequence: SERVER_ISN });
+    const client = new TcpSocket({ host: a, sim, initialSequence: CLIENT_ISN });
+    const received: Array<Uint8Array> = [];
+    server.onData = (data) => received.push(data);
+    server.listen(SERVER_PORT);
+    // An application that sends as soon as it sees ESTABLISHED puts its first
+    // bytes on the wire ahead of the bare ACK of the SYN+ACK: the server must
+    // deliver them while it completes its own open, not drop them.
+    client.onStateChange = (state) => {
+      if (state === "ESTABLISHED") {
+        client.send(new Uint8Array([7, 8, 9]));
+      }
+    };
+    client.connect(IP_B, SERVER_PORT);
+    // Well before the RTO: the bytes must arrive on the first attempt, not be
+    // repaired a second later by the retransmission timer.
+    sim.runUntil(sim.now + 10 * LATENCY_US);
+
+    expect(client.state).toBe("ESTABLISHED");
+    expect(server.state).toBe("ESTABLISHED");
+    expect(joined(received)).toEqual(new Uint8Array([7, 8, 9]));
+    expect(server.read()).toEqual(new Uint8Array([7, 8, 9]));
+    expect(server.rcvNxt).toBe(CLIENT_ISN + 1 + 3);
+    expect(client.sndUna).toBe(CLIENT_ISN + 1 + 3);
+  });
+
+  test("delivers payload to the accepted child, never to the listener", () => {
+    const { sim, a, b } = directLink(53);
+    const listener = new TcpSocket({ host: b, sim, backlog: 2 });
+    let listenerBytes = 0;
+    listener.onData = (data) => {
+      listenerBytes += data.length;
+    };
+    listener.listen(ACCEPT_PORT);
+    const client = new TcpSocket({ host: a, sim, initialSequence: 3000 });
+    client.connect(IP_B, ACCEPT_PORT, { localPort: 30001 });
+    sim.runAll();
+
+    const accepted = listener.accept();
+    expect(accepted).toBeDefined();
+    if (accepted === undefined) {
+      return;
+    }
+    const received: Array<Uint8Array> = [];
+    accepted.onData = (data) => received.push(data);
+    const payload = patterned(2 * DEFAULT_MSS, 3);
+    client.send(payload);
+    sim.runAll();
+
+    expect(joined(received)).toEqual(payload);
+    expect(accepted.read()).toEqual(payload);
+    expect(listenerBytes).toBe(0);
+  });
+
+  test("accepts a connection whose peer already sent its FIN", () => {
+    const { sim, a, b } = directLink(63);
+    const listener = new TcpSocket({ host: b, sim, backlog: 2 });
+    listener.listen(ACCEPT_PORT);
+    const client = new TcpSocket({ host: a, sim, initialSequence: 3000 });
+    const payload = new Uint8Array([1, 2, 3]);
+    client.connect(IP_B, ACCEPT_PORT, { localPort: 30001 });
+    sim.runAll();
+    client.send(payload);
+    client.close();
+    sim.runAll();
+
+    expect(client.state).toBe("FIN_WAIT_2");
+    const accepted = listener.accept();
+    expect(accepted).toBeDefined();
+    if (accepted === undefined) {
+      return;
+    }
+    // Half-closed but readable: the data sent before the FIN is still there.
+    expect(accepted.state).toBe("CLOSE_WAIT");
+    expect(accepted.read()).toEqual(payload);
+    accepted.close();
+    sim.runAll();
+    expect(accepted.state).toBe("CLOSED");
+  });
+
+  test("discards a SYN when the backlog is full, without answering a RST", () => {
+    const { sim, bus, a, b } = directLink(55);
+    const listener = new TcpSocket({ host: b, sim, backlog: 2 });
+    listener.listen(ACCEPT_PORT);
+    const clients = [30001, 30002, 30003].map((localPort) => {
+      const client = new TcpSocket({ host: a, sim });
+      client.connect(IP_B, ACCEPT_PORT, { localPort });
+      return client;
+    });
+    sim.runUntil(sim.now + 10 * LATENCY_US);
+
+    expect(listener.state).toBe("LISTEN");
+    expect(listener.pendingAccepts).toHaveLength(2);
+    expect(clients[2]?.state).toBe("SYN_SENT");
+
+    const traces = bus.drain();
+    const resets = traces.filter(
+      (trace) =>
+        trace.kind === "frame_tx" && decodeTcp(trace.frame)?.flags.rst === true,
+    );
+    expect(resets).toHaveLength(0);
+
+    // The rejected peer retries on its own RTO and is dropped again.
+    sim.runUntil(sim.now + DEFAULT_RTO_US);
+    expect(listener.pendingAccepts).toHaveLength(2);
+    expect(clients[2]?.state).toBe("SYN_SENT");
+  });
+
+  test("backlog 1 keeps the historical single connection and accepts itself", () => {
+    const { sim, a, b } = directLink(57);
+    const server = new TcpSocket({ host: b, sim, initialSequence: SERVER_ISN });
+    const client = new TcpSocket({ host: a, sim, initialSequence: CLIENT_ISN });
+    server.listen(SERVER_PORT);
+    expect(server.accept()).toBeUndefined();
+    const notified: Array<TcpSocket> = [];
+    server.onAccept = (socket) => notified.push(socket);
+    client.connect(IP_B, SERVER_PORT);
+    sim.runAll();
+
+    expect(server.state).toBe("ESTABLISHED");
+    expect(server.pendingAccepts).toEqual([server]);
+    expect(notified).toEqual([server]);
+    expect(server.accept()).toBe(server);
+    expect(server.accept()).toBeUndefined();
+  });
+
+  test("publishes live sockets on the host and withdraws them on release", () => {
+    const { sim, a, b } = directLink(59);
+    const listener = new TcpSocket({ host: b, sim, backlog: 2 });
+    const client = new TcpSocket({ host: a, sim, initialSequence: 3000 });
+    expect(b.tcpSockets).toHaveLength(0);
+    listener.listen(ACCEPT_PORT);
+    expect(b.tcpSockets).toEqual([listener]);
+    client.connect(IP_B, ACCEPT_PORT, { localPort: 30001 });
+    expect(a.tcpSockets).toEqual([client]);
+    sim.runAll();
+    expect(b.tcpSockets).toHaveLength(2);
+
+    const accepted = listener.accept();
+    expect(accepted).toBeDefined();
+    if (accepted === undefined) {
+      return;
+    }
+    expect(b.tcpSockets).toContain(accepted);
+
+    client.close();
+    sim.runUntil(sim.now + 4 * LATENCY_US);
+    expect(accepted.state).toBe("CLOSE_WAIT");
+    accepted.close();
+    sim.runUntil(sim.now + 8 * LATENCY_US);
+    expect(accepted.state).toBe("CLOSED");
+    expect(b.tcpSockets).toEqual([listener]);
+
+    // The socket that closed first parks in TIME_WAIT and leaves on expiry.
+    expect(client.state).toBe("TIME_WAIT");
+    sim.runUntil(sim.now + DEFAULT_TIME_WAIT_US);
+    expect(client.state).toBe("CLOSED");
+    expect(a.tcpSockets).toHaveLength(0);
+  });
+});

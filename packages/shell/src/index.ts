@@ -29,11 +29,14 @@ export {
 } from "./neighbors";
 export {
   type ArpCommand,
+  DEFAULT_HTTP_PORT,
   DEFAULT_PING_COUNT,
   DEFAULT_PING_SIZE,
   DEFAULT_PING_TTL,
   type DhclientCommand,
   type DigCommand,
+  type HttpGetCommand,
+  type HttpServerCommand,
   type IpAddrSetCommand,
   type IpAddrShowCommand,
   type IpLinkSetCommand,
@@ -43,11 +46,13 @@ export {
   MAX_NC_PAYLOAD_BYTES,
   MAX_PING_COUNT,
   MAX_PING_SIZE,
+  type NcTcpCommand,
   type NcUdpCommand,
   type PingCommand,
   parseCommandLine,
   type ShellCommand,
   type ShellParseResult,
+  type SsCommand,
   type TracerouteCommand,
 } from "./parse";
 export {

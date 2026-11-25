@@ -191,10 +191,14 @@ describe("parse: nc -u grammar (T4)", () => {
     });
   });
 
-  test("rejects TCP mode, bad ports, bad hosts and bad hex", () => {
-    expect(rejected(`nc ${IP_B_SAME_SUBNET} ${ECHO_PORT}`).code).toBe(
-      "unsupported",
-    );
+  test("rejects bad flags, ports, hosts and hex", () => {
+    // Bare `nc HOST PORT` is TCP now (T6); the pin was a T4 placeholder.
+    expect(accepted(`nc ${IP_B_SAME_SUBNET} ${ECHO_PORT}`)).toEqual({
+      kind: "nc.tcp",
+      host: IP_B_SAME_SUBNET,
+      port: ECHO_PORT,
+      payload: "",
+    });
     expect(rejected(`nc -l ${ECHO_PORT}`).code).toBe("unknown_flag");
     expect(rejected(`nc -u ${IP_B_SAME_SUBNET}`).code).toBe("missing_argument");
     expect(rejected(`nc -u ${IP_B_SAME_SUBNET} 0`).code).toBe(

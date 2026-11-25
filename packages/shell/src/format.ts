@@ -1,8 +1,9 @@
 /**
  * Text formatting for `ip addr`, `ip link`, `ip route`, `ip neigh`, `arp -a`
- * (S7) plus the Fase 4 commands `dig`, `dhclient` and `nc -u`. All data comes
- * from Host snapshots or application results; nothing is cached here except
- * the neighbor candidates described in `neighbors.ts`.
+ * (S7) plus the Fase 4 commands `dig`, `dhclient` and `nc -u` and the Fase 5
+ * TCP surface `nc` (TCP), `ss` and `curl`. All data comes from Host snapshots
+ * or application results; nothing is cached here except the neighbor
+ * candidates described in `neighbors.ts`.
  */
 
 import { Ipv4Address } from "@netlab/bytes";
@@ -12,6 +13,7 @@ import {
   type DnsResolutionStatus,
   type Host,
   prefixToMask,
+  type TcpState,
 } from "@netlab/core";
 import type { NeighborEntry } from "./neighbors";
 
@@ -259,5 +261,132 @@ export function formatNcUdpLines(view: NcUdpView): Array<string> {
   }
   lines.push(`--- ${view.host}:${view.port} udp ---`);
   lines.push(`1 sent, ${view.replies.length} received`);
+  return lines;
+}
+
+/** One TCP session collected by `nc`, payload already hex-encoded. */
+export interface NcTcpView {
+  readonly host: string;
+  readonly port: number;
+  /** Payload sent after the handshake, lowercase hex. */
+  readonly payload: string;
+  /** Every byte received, concatenated and hex-encoded. */
+  readonly received: string;
+  /** True when the three-way handshake completed before the deadline. */
+  readonly connected: boolean;
+  /** Connection state at the deadline, before the command closes the socket. */
+  readonly state: TcpState;
+}
+
+/**
+ * `nc` (TCP) output: the target, the handshake outcome, the bytes sent and
+ * received, and the state the connection reached before the deadline.
+ *
+ * A refused connection (RST) and a silent one (SYN dropped, no answer) read
+ * differently: the first left CLOSED, the second is still trying. The byte
+ * counts are aggregated because TCP is a stream, unlike the per-datagram
+ * `nc -u` report.
+ */
+export function formatNcTcpLines(view: NcTcpView): Array<string> {
+  const lines = [`TCP ${view.host}:${view.port}`];
+  if (view.connected) {
+    lines.push(
+      `sent ${view.payload.length / 2} bytes${payloadSuffix(view.payload)}`,
+    );
+  } else {
+    lines.push(
+      view.state === "CLOSED" ? "connect: refused" : "connect: timeout",
+    );
+  }
+  lines.push(
+    `received ${view.received.length / 2} bytes${payloadSuffix(view.received)}`,
+  );
+  lines.push(`--- ${view.host}:${view.port} tcp ---`);
+  lines.push(`state ${view.state}, ${view.received.length / 2} bytes received`);
+  return lines;
+}
+
+/** One row of the `ss` table: a live TCP socket as the host sees it. */
+export interface SsSocketView {
+  readonly state: TcpState;
+  /** `address:port`, or the wildcard `0.0.0.0:port` for a listener. */
+  readonly local: string;
+  /** `address:port`, or `0.0.0.0:*` while the peer is not known. */
+  readonly peer: string;
+  readonly cwnd: number;
+  readonly ssthresh: number;
+}
+
+const SS_STATE_WIDTH = 12;
+const SS_ADDRESS_WIDTH = 21;
+const SS_NUMBER_WIDTH = 8;
+
+/**
+ * `ss` output: one aligned row per TCP socket with the connection state, both
+ * endpoints and the congestion numbers (`cwnd`, `ssthresh`) the UI plots.
+ *
+ * The header is part of the contract so an empty host still prints something;
+ * columns are padded to fixed widths, never shrunk to the content.
+ */
+export function formatSsLines(
+  rows: ReadonlyArray<SsSocketView>,
+): Array<string> {
+  const header =
+    "State".padEnd(SS_STATE_WIDTH) +
+    " " +
+    "Local Address".padEnd(SS_ADDRESS_WIDTH) +
+    " " +
+    "Peer Address".padEnd(SS_ADDRESS_WIDTH) +
+    " " +
+    "Cwnd".padStart(SS_NUMBER_WIDTH) +
+    " " +
+    "Ssthresh".padStart(SS_NUMBER_WIDTH);
+  const lines = [header.trimEnd()];
+  for (const row of rows) {
+    lines.push(
+      row.state.padEnd(SS_STATE_WIDTH) +
+        " " +
+        row.local.padEnd(SS_ADDRESS_WIDTH) +
+        " " +
+        row.peer.padEnd(SS_ADDRESS_WIDTH) +
+        " " +
+        String(row.cwnd).padStart(SS_NUMBER_WIDTH) +
+        " " +
+        String(row.ssthresh).padStart(SS_NUMBER_WIDTH),
+    );
+  }
+  return lines;
+}
+
+/** One HTTP response as `curl` prints it: status plus the decoded body. */
+export interface HttpGetView {
+  readonly statusCode: number;
+  readonly reason: string;
+  readonly body: string;
+}
+
+/**
+ * `curl` output: the body of a 200 response, line by line.
+ *
+ * Non-200 answers are prefixed with one diagnostic line and still print the
+ * body (the server sends a short HTML message). The body is ASCII and CRLF is
+ * normalized away, so the lines are stable across runs.
+ */
+export function formatHttpGetLines(view: HttpGetView): Array<string> {
+  const lines: Array<string> = [];
+  if (view.statusCode !== 200) {
+    const reason = view.reason.length === 0 ? "" : ` ${view.reason}`;
+    lines.push(`curl: HTTP ${view.statusCode}${reason}`);
+  }
+  if (view.body.length === 0) {
+    return lines;
+  }
+  const body = view.body.split("\n");
+  if (body.at(-1) === "") {
+    body.pop();
+  }
+  for (const line of body) {
+    lines.push(line.endsWith("\r") ? line.slice(0, -1) : line);
+  }
   return lines;
 }

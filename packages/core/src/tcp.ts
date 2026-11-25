@@ -89,9 +89,32 @@
  *   sawtooth. Hosts keep their bus private, so a caller that wants these
  *   samples passes the same bus it handed the host.
  *
- * Still out of scope: the socket/HTTP API (5.6). Control traffic does not gate
- * on data: FIN is queued behind outstanding data and only leaves once the peer
- * has acknowledged every byte.
+ * Still out of scope: SACK, NewReno, an RTT estimator and any congestion
+ * algorithm other than classic Reno. Control traffic does not gate on data:
+ * FIN is queued behind outstanding data and only leaves once the peer has
+ * acknowledged every byte.
+ *
+ * Scope of hito 5.6 — the socket API the shell and HTTP ride on (F-61):
+ *
+ * - Accept queue. A listening socket publishes completed connections in
+ *   `pendingAccepts`, and `accept()` dequeues the oldest one that is still
+ *   usable (ESTABLISHED, or CLOSE_WAIT when the peer already sent its FIN and
+ *   the data must still be read). `backlog` bounds the queue and defaults to
+ *   one connection. With `backlog: 1` the listener keeps the historical path:
+ *   its own TCB completes the handshake and is published to the queue. Values
+ *   above one keep the listener in LISTEN and fork a child TCB per handshake,
+ *   which is what lets one port serve more than one connection. A SYN that
+ *   finds the backlog full is discarded — never answered with RST — so the
+ *   peer retries on its own RTO instead of failing the connect.
+ * - Event seam. `onAccept` fires with every connection published to the
+ *   queue, so an event-driven server never has to poll `accept()`; the socket
+ *   still waits in `pendingAccepts` until the application dequeues it.
+ * - Host registry. A socket registers itself on `listen()`/`connect()` and
+ *   unregisters when its TCB is released, so `Host.tcpSockets` is the live
+ *   view `ss` and the UI list (`state`, addresses, `cwnd`, `ssthresh`).
+ * - HTTP is not part of the machine: the shell builds the minimal HTTP/1.0
+ *   request/response on top of `send()`/`onData` (GET only, Content-Length,
+ *   no keep-alive, no chunked).
  *
  * Time and randomness come from the `Simulation`: the ISN and the ephemeral
  * local port are drawn from `sim.random` (overridable for tests), while
@@ -156,6 +179,15 @@ export const DEFAULT_ZERO_WINDOW_PROBE_US = 1_000_000;
 const MAX_WINDOW = 0xffff;
 
 /**
+ * Default accept queue depth of a listening socket.
+ *
+ * One keeps the historical single-connection behaviour (the listener's own
+ * TCB completes the handshake); values above one keep the listener in LISTEN
+ * and fork a child TCB per connection, up to this many at a time.
+ */
+export const DEFAULT_BACKLOG = 1;
+
+/**
  * Retransmission timeout before any backoff (hito 5.4).
  *
  * The value is deliberately fixed: an RTT estimator lands in hito 5.5, so for
@@ -170,6 +202,11 @@ export const DEFAULT_MAX_RTO_US = 60_000_000;
 const TCP_EPHEMERAL_MIN = 49152;
 const TCP_EPHEMERAL_MAX = 65535;
 const TCP_EPHEMERAL_PORTS = TCP_EPHEMERAL_MAX - TCP_EPHEMERAL_MIN + 1;
+
+/** Key of one connection inside a listener's forked-child map. */
+function connectionKey(ip: string, port: number): string {
+  return `${ip}:${port}`;
+}
 
 const NO_FLAGS: TcpFlags = {
   fin: false,
@@ -226,6 +263,21 @@ export interface TcpSocketOptions {
   maxRtoUs?: number;
   /** Called with each in-order chunk of received data (a fresh copy). */
   onData?: (data: Uint8Array) => void;
+  /**
+   * Accept queue depth of a listening socket; default
+   * {@link DEFAULT_BACKLOG}. One keeps the historical single-connection path
+   * (the listener's own TCB accepts the handshake); above one the listener
+   * stays in LISTEN and forks a child per connection. A SYN that arrives with
+   * no room is discarded (no RST), so the peer retries on its own RTO.
+   */
+  backlog?: number;
+  /**
+   * Called when a connection is published to {@link TcpSocket.pendingAccepts}:
+   * the listener itself with `backlog: 1`, or the forked child otherwise. It is
+   * the event-driven seam for servers that never poll `accept()`; the socket
+   * still waits in the queue until the application dequeues it.
+   */
+  onAccept?: (socket: TcpSocket) => void;
   /**
    * Trace bus that receives the congestion `state()` samples (`cwnd`,
    * `ssthresh`, the phase transition). Hosts keep their own bus private, so a
@@ -302,6 +354,14 @@ export class TcpSocket {
     undefined;
   /** Called with each in-order chunk of received data (a copy the callee owns). */
   onData: ((data: Uint8Array) => void) | undefined = undefined;
+  /**
+   * Called with every connection published to {@link pendingAccepts}.
+   * Assignable at construction time and later; without one a listener is polled
+   * through `accept()`.
+   */
+  onAccept: ((socket: TcpSocket) => void) | undefined = undefined;
+  /** Accept queue depth; a SYN that finds it full is discarded. */
+  readonly backlog: number;
   /** Segment size used by {@link TcpSocket.send}. */
   readonly mss: number;
   /** Fixed top on unacknowledged data, above `cwnd` and the peer's window. */
@@ -326,6 +386,7 @@ export class TcpSocket {
   private stateValue: TcpState = "CLOSED";
   private binding: HostTcpSocket | undefined = undefined;
   private localPortValue: number | undefined = undefined;
+  private localIpValue: string | undefined = undefined;
   private remoteIpValue: string | undefined = undefined;
   private remotePortValue: number | undefined = undefined;
   private issValue: number | undefined = undefined;
@@ -368,6 +429,16 @@ export class TcpSocket {
   private readonly reordered = new Map<number, Uint8Array>();
   /** In-order bytes not yet drained by `read()`. */
   private readonly receivedChunks: Array<Uint8Array> = [];
+  /** Listener whose port owns this forked connection, if any. */
+  private listener: TcpSocket | undefined = undefined;
+  /** True while this socket owns a listening port (survives LISTEN). */
+  private listening = false;
+  /** Connections published to {@link pendingAccepts} and not dequeued yet. */
+  private readonly acceptQueue: Array<TcpSocket> = [];
+  /** True once a `backlog: 1` listener published its own connection. */
+  private selfPublished = false;
+  /** Forked connections of a `backlog > 1` listener, keyed by peer 4-tuple. */
+  private readonly children = new Map<string, TcpSocket>();
 
   constructor(options: TcpSocketOptions) {
     this.host = options.host;
@@ -384,6 +455,12 @@ export class TcpSocket {
     this.timeWaitUs = timeWaitUs;
     this.onStateChange = options.onStateChange;
     this.onData = options.onData;
+    this.onAccept = options.onAccept;
+    const backlog = options.backlog ?? DEFAULT_BACKLOG;
+    if (!Number.isInteger(backlog) || backlog < 1) {
+      throw new RangeError(`backlog must be an integer >= 1: ${backlog}`);
+    }
+    this.backlog = backlog;
     const mss = options.mss ?? DEFAULT_MSS;
     if (!Number.isInteger(mss) || mss <= 0 || mss > MAX_WINDOW) {
       throw new RangeError(`mss must be an integer in 1..65535: ${mss}`);
@@ -439,6 +516,28 @@ export class TcpSocket {
   /** Local port, once the socket is listening or connecting. */
   get localPort(): number | undefined {
     return this.localPortValue;
+  }
+
+  /**
+   * Local IPv4 address in presentation form, once known.
+   *
+   * A connecting socket learns it from the route, an accepted connection from
+   * the destination of the SYN; a listener that has not accepted anything yet
+   * has none and `ss` shows the wildcard address.
+   */
+  get localIp(): string | undefined {
+    return this.localIpValue;
+  }
+
+  /**
+   * Connections published by this listener and not dequeued by `accept()` yet.
+   *
+   * The queue holds ESTABLISHED sockets, plus CLOSE_WAIT ones whose peer closed
+   * its half but whose data is still readable. A copy is returned: mutating it
+   * cannot change the listener.
+   */
+  get pendingAccepts(): ReadonlyArray<TcpSocket> {
+    return this.acceptQueue.filter((socket) => socket.state !== "CLOSED");
   }
 
   /** Peer IPv4 address in presentation form, once known. */
@@ -531,8 +630,10 @@ export class TcpSocket {
   /**
    * Reserve `port` and wait for a SYN (CLOSED → LISTEN).
    *
-   * One connection per socket in this milestone: there is no accept backlog
-   * yet (hito 5.6), so a second handshake on the same port is ignored.
+   * `backlog` decides how many connections the listener holds: one keeps the
+   * historical path (the listening socket's own TCB becomes the connection),
+   * above one forks a child per connection and stays in LISTEN. A SYN that
+   * finds no room is discarded, so the peer retries instead of failing.
    */
   listen(port: number): void {
     this.requireClosed("listen");
@@ -540,6 +641,8 @@ export class TcpSocket {
     this.clearTcb();
     this.binding = this.host.bindTcp(port, this.handler);
     this.localPortValue = port;
+    this.listening = true;
+    this.host.registerTcpSocket(this);
     this.transition("LISTEN");
   }
 
@@ -558,7 +661,7 @@ export class TcpSocket {
     this.requireClosed("connect");
     checkPort(remotePort);
     const destination = Ipv4Address.parse(remoteIp);
-    this.host.routeSourceIp(remoteIp);
+    const source = this.host.routeSourceIp(remoteIp);
     this.clearTcb();
     if (opts.localPort !== undefined) {
       checkPort(opts.localPort);
@@ -567,14 +670,40 @@ export class TcpSocket {
     } else {
       this.localPortValue = this.openEphemeralPort();
     }
+    this.localIpValue = source.toString();
     this.remoteIpValue = destination.toString();
     this.remotePortValue = remotePort;
     this.issValue = this.pickInitialSequence();
     this.sndUnaValue = nextSequence(this.issValue);
     this.sndNxtValue = nextSequence(this.issValue);
+    this.host.registerTcpSocket(this);
     this.traceCongestion("open");
     this.transition("SYN_SENT");
     this.transmit({ syn: true }, this.issValue, 0);
+  }
+
+  /**
+   * Dequeue the oldest connection that is still usable.
+   *
+   * Returns an ESTABLISHED socket, or a CLOSE_WAIT one whose peer already
+   * closed its half (its data is still readable). Closed entries are skipped,
+   * so a connection that died before the application accepted it never comes
+   * back half-dead. Returns undefined when nothing is waiting.
+   */
+  accept(): TcpSocket | undefined {
+    while (this.acceptQueue.length > 0) {
+      const socket = this.acceptQueue.shift();
+      if (socket === undefined) {
+        return undefined;
+      }
+      if (socket === this) {
+        this.selfPublished = false;
+      }
+      if (socket.state !== "CLOSED") {
+        return socket;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -677,6 +806,14 @@ export class TcpSocket {
    */
   private onSegment(inbound: HostTcpSegment): void {
     const segment = inbound.segment;
+    // A listener owns the port, so a forked connection's traffic arrives here:
+    // route it by 4-tuple before any listener-level handling (an RST for a
+    // child must never tear the listener down).
+    const child = this.forkedConnection(inbound, segment);
+    if (child !== undefined) {
+      child.onSegment(inbound);
+      return;
+    }
     if (segment.flags.rst) {
       // A reset ends the connection from any state (RFC 793 §3.4).
       this.transition("CLOSED");
@@ -730,13 +867,18 @@ export class TcpSocket {
     }
   }
 
-  /** LISTEN: a SYN opens the connection, anything else is not ours. */
+  /** LISTEN: a SYN opens the connection; anything else is not ours. */
   private receiveInListen(inbound: HostTcpSegment, segment: TcpSegment): void {
     if (!segment.flags.syn || segment.flags.ack) {
       return;
     }
+    if (this.backlog > 1) {
+      this.acceptForked(inbound, segment);
+      return;
+    }
     this.remoteIpValue = inbound.srcIp;
     this.remotePortValue = segment.srcPort;
+    this.localIpValue = inbound.dstIp;
     this.irsValue = segment.seq;
     this.rcvNxtValue = nextSequence(segment.seq);
     // The SYN is where a TCP first learns the peer's window (SND.WND).
@@ -748,6 +890,101 @@ export class TcpSocket {
     this.traceCongestion("open");
     this.transition("SYN_RECEIVED");
     this.transmit({ syn: true, ack: true }, this.issValue, this.rcvNxtValue);
+  }
+
+  /**
+   * Listener with a backlog above one: fork a child TCB for this SYN.
+   *
+   * The listener never leaves LISTEN, so it keeps owning the port and routes
+   * each child's traffic by 4-tuple. A SYN that finds the backlog full (or a
+   * retransmitted SYN for a connection already being opened) is dropped and
+   * never answered with RST: the peer retries on its own RTO, which is the
+   * amiable rejection this milestone promises.
+   */
+  private acceptForked(inbound: HostTcpSegment, segment: TcpSegment): void {
+    this.pruneClosedChildren();
+    const key = connectionKey(inbound.srcIp, segment.srcPort);
+    if (this.children.has(key)) {
+      return;
+    }
+    if (this.children.size >= this.backlog) {
+      return;
+    }
+    this.children.set(key, this.forkConnection(inbound, segment));
+  }
+
+  /**
+   * Build the child TCB of one forked connection and answer its SYN.
+   *
+   * The child shares the listener's configuration but owns its own sequence
+   * space and buffers; it has no port binding because inbound segments reach
+   * it through the listener's handler. A configured fixed ISN is inherited, so
+   * a deterministic listener keeps deterministic connections.
+   */
+  private forkConnection(
+    inbound: HostTcpSegment,
+    segment: TcpSegment,
+  ): TcpSocket {
+    const child = new TcpSocket({
+      host: this.host,
+      sim: this.sim,
+      timeWaitUs: this.timeWaitUs,
+      mss: this.mss,
+      sendWindow: this.sendWindow,
+      receiveCapacity: this.receiveCapacity,
+      zeroWindowProbeUs: this.zeroWindowProbeUs,
+      rtoUs: this.rtoBaseUs,
+      maxRtoUs: this.maxRtoUs,
+      ...(this.initialSequence === undefined
+        ? {}
+        : { initialSequence: this.initialSequence }),
+      ...(this.bus === undefined ? {} : { bus: this.bus }),
+    });
+    const iss = child.pickInitialSequence();
+    const rcvNxt = nextSequence(segment.seq);
+    child.listener = this;
+    child.localPortValue = this.localPortValue;
+    child.localIpValue = inbound.dstIp;
+    child.remoteIpValue = inbound.srcIp;
+    child.remotePortValue = segment.srcPort;
+    child.irsValue = segment.seq;
+    child.rcvNxtValue = rcvNxt;
+    child.sndWndValue = segment.window;
+    child.issValue = iss;
+    child.sndUnaValue = nextSequence(iss);
+    child.sndNxtValue = nextSequence(iss);
+    child.resetCongestion();
+    child.traceCongestion("open");
+    this.host.registerTcpSocket(child);
+    child.transition("SYN_RECEIVED");
+    child.transmit({ syn: true, ack: true }, iss, rcvNxt);
+    return child;
+  }
+
+  /** The forked child that owns this segment's 4-tuple, if any. */
+  private forkedConnection(
+    inbound: HostTcpSegment,
+    segment: TcpSegment,
+  ): TcpSocket | undefined {
+    if (this.children.size === 0) {
+      return undefined;
+    }
+    const child = this.children.get(
+      connectionKey(inbound.srcIp, segment.srcPort),
+    );
+    if (child === undefined || child.state === "CLOSED") {
+      return undefined;
+    }
+    return child;
+  }
+
+  /** Drop forked children that finished, freeing their backlog slot. */
+  private pruneClosedChildren(): void {
+    for (const [key, child] of this.children) {
+      if (child.state === "CLOSED") {
+        this.children.delete(key);
+      }
+    }
   }
 
   /** SYN_SENT: SYN+ACK completes the open, a bare SYN is a simultaneous open. */
@@ -784,6 +1021,13 @@ export class TcpSocket {
     this.acknowledgeAll();
     this.sndWndValue = segment.window;
     this.transition("ESTABLISHED");
+    // The ACK that completes the open may already carry data (or a FIN): once
+    // ESTABLISHED the ordinary data path applies to the same segment, so an
+    // application that sends as soon as it sees ESTABLISHED does not lose its
+    // first bytes to the SYN_RECEIVED state.
+    if (segment.payload.length > 0 || segment.flags.fin) {
+      this.receiveInEstablished(segment);
+    }
   }
 
   /**
@@ -1528,9 +1772,29 @@ export class TcpSocket {
     // A torn-down connection has nothing left to retransmit.
     this.resetRetransmission();
     this.outstanding.length = 0;
+    this.host.unregisterTcpSocket(this);
+    // A listener that releases its port can no longer deliver anything to the
+    // connections it forked, so they are torn down with it.
+    this.teardownChildren();
+    this.acceptQueue.length = 0;
+    this.selfPublished = false;
+    this.listening = false;
     const binding = this.binding;
     this.binding = undefined;
     binding?.close();
+  }
+
+  /** Close every forked connection and forget the child map. */
+  private teardownChildren(): void {
+    if (this.children.size === 0) {
+      return;
+    }
+    const children = [...this.children.values()];
+    this.children.clear();
+    for (const child of children) {
+      child.transition("CLOSED");
+      child.release();
+    }
   }
 
   /** Forget the peer and sequence state of a previous connection. */
@@ -1538,6 +1802,7 @@ export class TcpSocket {
     this.cancelZeroWindowProbe();
     this.resetRetransmission();
     this.outstanding.length = 0;
+    this.localIpValue = undefined;
     this.remoteIpValue = undefined;
     this.remotePortValue = undefined;
     this.issValue = undefined;
@@ -1551,6 +1816,10 @@ export class TcpSocket {
     this.finQueued = false;
     this.reordered.clear();
     this.receivedChunks.length = 0;
+    this.listener = undefined;
+    this.listening = false;
+    this.acceptQueue.length = 0;
+    this.selfPublished = false;
     this.resetCongestion();
   }
 
@@ -1601,6 +1870,36 @@ export class TcpSocket {
     }
     this.stateValue = state;
     this.onStateChange?.(state, previous);
+    if (state === "ESTABLISHED") {
+      this.publishEstablished();
+    }
+  }
+
+  /**
+   * Publish a fresh connection to the accept queue.
+   *
+   * A forked child notifies its listener; a `backlog: 1` listener publishes
+   * its own TCB once, which keeps `listen()` + `accept()` working on the
+   * historical single-connection socket.
+   */
+  private publishEstablished(): void {
+    const owner = this.listener;
+    if (owner !== undefined) {
+      owner.publishAccepted(this);
+      return;
+    }
+    if (!this.listening || this.selfPublished) {
+      return;
+    }
+    this.selfPublished = true;
+    this.acceptQueue.push(this);
+    this.onAccept?.(this);
+  }
+
+  /** Append a forked connection to this listener's accept queue. */
+  private publishAccepted(socket: TcpSocket): void {
+    this.acceptQueue.push(socket);
+    this.onAccept?.(socket);
   }
 
   private requireClosed(action: string): void {

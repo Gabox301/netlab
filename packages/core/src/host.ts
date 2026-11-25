@@ -31,6 +31,13 @@
  * port is answered with a RST built from its sequence numbers. The state
  * machine itself lives in `tcp.ts`, never in this file.
  *
+ * The socket API of hito 5.6 adds one read-only view here without moving any
+ * connection state into the host: `TcpSocket` registers itself on
+ * `listen()`/`connect()` (`registerTcpSocket`) and unregisters when its TCB is
+ * released, so `tcpSockets` is the live list `ss` and the UI read. The
+ * reference is type-only: `tcp.ts` still depends on the host, never the other
+ * way around at runtime.
+ *
  * Cache discipline: every ARP packet refreshes `senderIp -> senderMac`, which
  * covers gratuitous announcements and lets a request resolve a pending entry
  * for the sender. A pending entry owns one retry timer: retries + 1 requests,
@@ -89,6 +96,7 @@ import {
   splitIpv4Prefix,
 } from "./route";
 import type { Simulation, TimerHandle } from "./sim";
+import type { TcpSocket } from "./tcp";
 import type { TraceBus } from "./trace";
 
 /** How long a resolved entry stays reachable. Default 300 s. */
@@ -417,7 +425,9 @@ export class Host extends Device {
   private readonly reassembler: Reassembler;
   private readonly pendingPings = new Map<string, number>();
   private readonly udpSockets = new Map<number, UdpSocketEntry>();
-  private readonly tcpSockets = new Map<number, TcpSocketEntry>();
+  private readonly tcpPorts = new Map<number, TcpSocketEntry>();
+  /** Live TCP sockets, in registration order (the `ss` view of hito 5.6). */
+  private readonly tcpSessions = new Set<TcpSocket>();
   private ipId = 1;
   private pingSequence = 0;
   private udpEphemeralNext: number | undefined = undefined;
@@ -738,19 +748,41 @@ export class Host extends Device {
    */
   bindTcp(port: number, handler?: HostTcpHandler): HostTcpSocket {
     checkU16Field("port", port);
-    if (this.tcpSockets.has(port)) {
+    if (this.tcpPorts.has(port)) {
       throw new Error(`${this.id}: TCP port ${port} is already bound`);
     }
     const entry: TcpSocketEntry = { handler };
-    this.tcpSockets.set(port, entry);
+    this.tcpPorts.set(port, entry);
     return {
       port,
       close: (): void => {
-        if (this.tcpSockets.get(port) === entry) {
-          this.tcpSockets.delete(port);
+        if (this.tcpPorts.get(port) === entry) {
+          this.tcpPorts.delete(port);
         }
       },
     };
+  }
+
+  /**
+   * Live TCP sockets attached to this host, in registration order.
+   *
+   * `TcpSocket` calls `registerTcpSocket()` from `listen()` and `connect()` and
+   * withdraws itself when the TCB is released, so this is the honest `ss`/
+   * UI view: state, addresses, cwnd and ssthresh are read from the sockets. A
+   * copy is returned and mutating it does not affect the host.
+   */
+  get tcpSockets(): ReadonlyArray<TcpSocket> {
+    return [...this.tcpSessions];
+  }
+
+  /** Register a socket so {@link tcpSockets} lists it. Idempotent. */
+  registerTcpSocket(socket: TcpSocket): void {
+    this.tcpSessions.add(socket);
+  }
+
+  /** Withdraw a socket from {@link tcpSockets}. Idempotent. */
+  unregisterTcpSocket(socket: TcpSocket): void {
+    this.tcpSessions.delete(socket);
   }
 
   /**
@@ -1272,7 +1304,7 @@ export class Host extends Device {
       return;
     }
     const segment = parsed.value;
-    const socket = this.tcpSockets.get(segment.dstPort);
+    const socket = this.tcpPorts.get(segment.dstPort);
     if (socket === undefined) {
       this.sendTcpReset(iface, packet, segment);
       return;

@@ -10,6 +10,14 @@
  * Host callbacks (`onEchoReply` / `onIcmpError`) are chained: a handler
  * installed before the shell is constructed keeps working. Code that
  * replaces those properties after construction takes ownership back.
+ *
+ * Fase 5 adds the TCP surface on top of that: `nc` (TCP by default, UDP with
+ * `-u`), `ss`, and a minimal HTTP/1.0 client/server. The HTTP slice is
+ * deliberately narrow: one `GET` request per connection, a fixed page served
+ * with `Content-Length` and `Connection: close`; no keep-alive, no pipelining,
+ * no chunked transfer encoding and no redirects. `http-server` installs an
+ * event-driven listener and returns, so the clock only moves when another
+ * command (or a test) talks to it.
  */
 
 import { Ipv4Address } from "@netlab/bytes";
@@ -27,6 +35,7 @@ import {
   type HostIcmpError,
   type HostIpConfigInput,
   type Simulation,
+  TcpSocket,
 } from "@netlab/core";
 import {
   ICMP_CODE_FRAG_NEEDED,
@@ -42,10 +51,13 @@ import {
   formatArpLines,
   formatDhclientLines,
   formatDigLines,
+  formatHttpGetLines,
   formatIpNeighLines,
   formatLinkLines,
+  formatNcTcpLines,
   formatNcUdpLines,
   formatRouteLines,
+  formatSsLines,
 } from "./format";
 import {
   hostNeighborEntries,
@@ -55,8 +67,12 @@ import {
   sortNeighborEntries,
 } from "./neighbors";
 import {
+  DEFAULT_HTTP_PORT,
   type DhclientCommand,
   type DigCommand,
+  type HttpGetCommand,
+  type HttpServerCommand,
+  type NcTcpCommand,
   type NcUdpCommand,
   type PingCommand,
   parseCommandLine,
@@ -80,7 +96,7 @@ export const DEFAULT_DIG_RETRIES = DEFAULT_DNS_RETRIES;
 export const DEFAULT_DHCLIENT_TIMEOUT_US = DEFAULT_DHCP_TIMEOUT_US;
 /** Retransmissions per `dhclient`; mirrors the core client default. */
 export const DEFAULT_DHCLIENT_RETRIES = DEFAULT_DHCP_RETRIES;
-/** Virtual window `nc -u` keeps listening for replies. */
+/** Virtual window `nc` keeps collecting replies and `curl` waits for the page. */
 export const DEFAULT_NC_TIMEOUT_US = 1_000_000;
 
 /** First port the shell binds for its own UDP sockets (dynamic range). */
@@ -88,6 +104,34 @@ const UDP_PORT_START = 49200;
 
 /** Echo data size used by traceroute probes. */
 const TRACEROUTE_SIZE = 32;
+
+/**
+ * Connections a shell HTTP server holds at once: the accept backlog of the
+ * listener it installs. Beyond this a new SYN is dropped and the peer retries.
+ */
+const HTTP_BACKLOG = 4;
+
+/** Empty payload shared by the hot paths that need zero bytes. */
+const NO_BYTES = new Uint8Array(0);
+
+/**
+ * Fixed page served at `GET /`. Pure ASCII, so a character is a byte and
+ * `Content-Length` is `HTTP_PAGE.length`.
+ */
+const HTTP_PAGE = [
+  "<!doctype html>",
+  "<html>",
+  "<head><title>netlab</title></head>",
+  "<body>",
+  "<h1>netlab</h1>",
+  "<p>Servidor HTTP/1.0 de ejemplo.</p>",
+  "</body>",
+  "</html>",
+  "",
+].join("\n");
+const HTTP_NOT_FOUND = "<h1>404 Not Found</h1>\n";
+const HTTP_BAD_REQUEST = "<h1>400 Bad Request</h1>\n";
+const HTTP_METHOD_NOT_ALLOWED = "<h1>405 Method Not Allowed</h1>\n";
 
 /** Static listing for the `help` command (no state, no clock). */
 const HELP_LINES: ReadonlyArray<string> = [
@@ -100,7 +144,10 @@ const HELP_LINES: ReadonlyArray<string> = [
   "traceroute DST - trace hops",
   "dig [@SERVER] NAME [A] - resolve a name over DNS",
   "dhclient [IFACE] - obtain an address over DHCP",
-  "nc -u HOST PORT [HEX] - send a UDP datagram and print replies",
+  "nc [-u] HOST PORT [HEX] - send a TCP payload (UDP with -u) and print replies",
+  "ss - list TCP sockets with state, addresses and cwnd/ssthresh",
+  "http-server [PORT] - serve a fixed HTTP/1.0 page (default 80)",
+  "curl http://HOST[:PORT][/PATH] - one HTTP/1.0 GET, print the body",
   "help - this list",
 ];
 
@@ -141,7 +188,7 @@ export interface ShellOptions {
   dhcpTimeoutUs?: number;
   /** Retransmissions per `dhclient` (total attempts = retries + 1). */
   dhcpRetries?: number;
-  /** Virtual window `nc -u` keeps collecting replies. */
+  /** Virtual window `nc` keeps collecting replies. */
   ncTimeoutUs?: number;
 }
 
@@ -286,6 +333,161 @@ function assertNever(value: never): never {
   throw new Error(`unhandled shell command: ${JSON.stringify(value)}`);
 }
 
+/** Concatenate byte arrays into one fresh buffer. */
+function concatBytes(chunks: ReadonlyArray<Uint8Array>): Uint8Array {
+  let total = 0;
+  for (const chunk of chunks) {
+    total += chunk.length;
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+/**
+ * ASCII encode without `TextEncoder`: HTTP headers and the fixed page are pure
+ * ASCII by construction, so a character is a byte.
+ */
+function asciiToBytes(text: string): Uint8Array {
+  const bytes = new Uint8Array(text.length);
+  for (let index = 0; index < text.length; index++) {
+    bytes[index] = text.charCodeAt(index) & 0x7f;
+  }
+  return bytes;
+}
+
+/** Decode bytes as ASCII; used only on HTTP traffic this stack produced. */
+function asciiFromBytes(bytes: Uint8Array): string {
+  let text = "";
+  for (const byte of bytes) {
+    text += String.fromCharCode(byte);
+  }
+  return text;
+}
+
+/** Index just past the blank line that ends the HTTP headers, or -1. */
+function httpHeadEnd(bytes: Uint8Array): number {
+  for (let index = 0; index + 3 < bytes.length; index++) {
+    if (
+      bytes[index] === 13 &&
+      bytes[index + 1] === 10 &&
+      bytes[index + 2] === 13 &&
+      bytes[index + 3] === 10
+    ) {
+      return index + 4;
+    }
+  }
+  return -1;
+}
+
+/**
+ * One HTTP/1.0 GET request: request line, `Host`, a fixed user agent and
+ * `Accept`, then the blank line that closes the header block (F-75).
+ */
+function httpRequestBytes(command: HttpGetCommand): Uint8Array {
+  const host =
+    command.port === DEFAULT_HTTP_PORT
+      ? command.host
+      : `${command.host}:${command.port}`;
+  return asciiToBytes(
+    `GET ${command.path} HTTP/1.0\r\n` +
+      `Host: ${host}\r\n` +
+      "User-Agent: netlab-curl\r\n" +
+      "Accept: */*\r\n" +
+      "\r\n",
+  );
+}
+
+/** Serialize a minimal HTTP/1.0 response with `Content-Length` and close. */
+function httpReply(status: number, reason: string, body: string): Uint8Array {
+  const head =
+    `HTTP/1.0 ${status} ${reason}\r\n` +
+    "Content-Type: text/html; charset=utf-8\r\n" +
+    `Content-Length: ${body.length}\r\n` +
+    "Connection: close\r\n" +
+    "\r\n";
+  return asciiToBytes(head + body);
+}
+
+/**
+ * Route one request line to the fixed page, a 404 or the method error.
+ *
+ * The server models exactly one route (`GET /`) and one payload: any other
+ * target is a 404 and any other method a 405, both with a short HTML body.
+ */
+function httpReplyFor(requestLine: string): Uint8Array {
+  const [method = "", target = ""] = requestLine.split(" ");
+  if (method.length === 0 || target.length === 0) {
+    return httpReply(400, "Bad Request", HTTP_BAD_REQUEST);
+  }
+  if (method !== "GET") {
+    return httpReply(405, "Method Not Allowed", HTTP_METHOD_NOT_ALLOWED);
+  }
+  if (target !== "/") {
+    return httpReply(404, "Not Found", HTTP_NOT_FOUND);
+  }
+  return httpReply(200, "OK", HTTP_PAGE);
+}
+
+/** Status line and body of one HTTP response, as `curl` reports them. */
+interface HttpResponse {
+  readonly statusCode: number;
+  readonly reason: string;
+  readonly body: string;
+}
+
+/**
+ * Parse an HTTP/1.0 response: status line, headers up to the blank line and a
+ * body trimmed to `Content-Length` when the header is present.
+ *
+ * Chunked transfer encoding is out of scope by design: this stack only speaks
+ * `Content-Length` bodies and one response per connection. A response whose
+ * headers never end or whose status line does not match is `undefined`, which
+ * the caller turns into a typed execution error.
+ */
+function parseHttpResponse(bytes: Uint8Array): HttpResponse | undefined {
+  const end = httpHeadEnd(bytes);
+  if (end === -1) {
+    return undefined;
+  }
+  const lines = asciiFromBytes(bytes.subarray(0, end - 4)).split("\r\n");
+  const statusLine = lines[0] ?? "";
+  const matched = /^HTTP\/1\.[01] ([0-9]{3})(?: (.*))?$/.exec(statusLine);
+  if (matched === null) {
+    return undefined;
+  }
+  const statusCode = Number.parseInt(matched[1] ?? "0", 10);
+  const reason = matched[2] ?? "";
+  let contentLength: number | undefined;
+  for (const line of lines.slice(1)) {
+    const colon = line.indexOf(":");
+    if (colon <= 0) {
+      continue;
+    }
+    if (line.slice(0, colon).trim().toLowerCase() !== "content-length") {
+      continue;
+    }
+    const parsed = Number.parseInt(line.slice(colon + 1).trim(), 10);
+    if (Number.isInteger(parsed) && parsed >= 0) {
+      contentLength = parsed;
+    }
+  }
+  const body = bytes.subarray(end);
+  const length =
+    contentLength === undefined
+      ? body.length
+      : Math.min(contentLength, body.length);
+  return {
+    statusCode,
+    reason,
+    body: asciiFromBytes(body.subarray(0, length)),
+  };
+}
+
 export class Shell {
   private readonly host: Host;
   private readonly sim: Simulation;
@@ -309,6 +511,10 @@ export class Shell {
   private activeProbe: ActiveProbe | undefined;
   private identifierSeed = 0x4e00;
   private udpPortSeed = UDP_PORT_START - 1;
+  /** HTTP servers installed by `http-server`, keyed by listening port. */
+  private readonly httpServers = new Map<number, TcpSocket>();
+  /** Request bytes accumulated per accepted HTTP connection. */
+  private readonly httpRequests = new Map<TcpSocket, Uint8Array>();
 
   constructor(options: ShellOptions) {
     this.host = options.host;
@@ -433,6 +639,14 @@ export class Shell {
         return this.dhclient(command);
       case "nc.udp":
         return this.ncUdp(command);
+      case "nc.tcp":
+        return this.ncTcp(command);
+      case "ss":
+        return this.ss();
+      case "http.server":
+        return this.httpServer(command);
+      case "http.get":
+        return this.httpGet(command);
       case "help":
         return [...HELP_LINES];
       default:
@@ -666,6 +880,190 @@ export class Shell {
         payload: bytesToHex(reply.payload),
       })),
     });
+  }
+
+  /**
+   * `nc` in TCP mode: connect, send the hex payload once the handshake is
+   * complete, collect everything the peer sends until the virtual deadline and
+   * report the connection state. Mirrors {@link ncUdp}: the clock is driven by
+   * `runUntil()` only, and the socket is closed before returning.
+   */
+  private ncTcp(command: NcTcpCommand): Array<string> {
+    const deadline = this.sim.now + this.ncTimeoutUs;
+    const chunks: Array<Uint8Array> = [];
+    let connected = false;
+    const socket = new TcpSocket({
+      host: this.host,
+      sim: this.sim,
+      onData: (data) => {
+        if (this.sim.now <= deadline) {
+          chunks.push(data);
+        }
+      },
+      onStateChange: (state) => {
+        if (state !== "ESTABLISHED") {
+          return;
+        }
+        connected = true;
+        socket.send(hexToBytes(command.payload));
+      },
+    });
+    socket.connect(command.host, command.port);
+    this.sim.runUntil(deadline);
+    const state = socket.state;
+    socket.close();
+    return formatNcTcpLines({
+      host: command.host,
+      port: command.port,
+      payload: command.payload,
+      received: bytesToHex(concatBytes(chunks)),
+      connected,
+      state,
+    });
+  }
+
+  /**
+   * `ss`: the host's live TCP sockets with state, endpoints and congestion
+   * numbers. Rows come from `host.tcpSockets`, so a listener, every connection
+   * it forked and outgoing connections all show up, whichever command — or
+   * test — created them.
+   */
+  private ss(): Array<string> {
+    const rows = this.host.tcpSockets.map((socket) => ({
+      state: socket.state,
+      local: `${socket.localIp ?? "0.0.0.0"}:${socket.localPort ?? 0}`,
+      peer:
+        socket.remoteIp === undefined || socket.remotePort === undefined
+          ? "0.0.0.0:*"
+          : `${socket.remoteIp}:${socket.remotePort}`,
+      cwnd: Math.round(socket.cwnd),
+      ssthresh: Math.round(socket.ssthresh),
+    }));
+    return formatSsLines(rows);
+  }
+
+  /**
+   * `http-server [PORT]`: install an event-driven HTTP/1.0 server and return.
+   *
+   * The command does not block the virtual clock: the listener stays in LISTEN
+   * with a small accept backlog, and every accepted connection is served from
+   * `onAccept` as the simulation runs for whoever is talking to it. A second
+   * `http-server` on the same port reports the existing one instead of binding
+   * twice.
+   */
+  private httpServer(command: HttpServerCommand): Array<string> {
+    const port = command.port ?? DEFAULT_HTTP_PORT;
+    if (this.httpServers.has(port)) {
+      return [`http-server: already listening on 0.0.0.0:${port}`];
+    }
+    const server = new TcpSocket({
+      host: this.host,
+      sim: this.sim,
+      backlog: HTTP_BACKLOG,
+      onAccept: (socket) => this.serveHttp(socket),
+    });
+    server.listen(port);
+    this.httpServers.set(port, server);
+    return [
+      `HTTP/1.0 server listening on 0.0.0.0:${port}`,
+      `GET / serves a fixed ${HTTP_PAGE.length}-byte page`,
+    ];
+  }
+
+  /**
+   * Attach the request handler to one accepted connection.
+   *
+   * `read()` drains anything that arrived with the handshake before `onData`
+   * is installed, so those bytes cannot be handled twice. Buffers of
+   * connections that died mid-request are dropped here.
+   */
+  private serveHttp(socket: TcpSocket): void {
+    for (const [pending] of this.httpRequests) {
+      if (pending.state === "CLOSED") {
+        this.httpRequests.delete(pending);
+      }
+    }
+    const early = socket.read();
+    socket.onData = (data) => this.handleHttpData(socket, data);
+    if (early.length > 0) {
+      this.handleHttpData(socket, early);
+    }
+  }
+
+  /**
+   * Accumulate bytes until the request headers are complete, answer once and
+   * close. HTTP/1.0 with `Connection: close`: no keep-alive, no pipelining.
+   */
+  private handleHttpData(socket: TcpSocket, data: Uint8Array): void {
+    const buffer = concatBytes([
+      this.httpRequests.get(socket) ?? NO_BYTES,
+      data,
+    ]);
+    if (httpHeadEnd(buffer) === -1) {
+      this.httpRequests.set(socket, buffer);
+      return;
+    }
+    this.httpRequests.delete(socket);
+    const requestLine = asciiFromBytes(buffer).split("\r\n")[0] ?? "";
+    socket.send(httpReplyFor(requestLine));
+    socket.close();
+  }
+
+  /**
+   * `curl URL`: one HTTP/1.0 GET over a connected TcpSocket.
+   *
+   * The request is sent when the handshake completes and the response is
+   * collected until the virtual deadline, exactly like `nc`. A refused or
+   * silent connection and a malformed response are typed execution errors; a
+   * non-200 status is still printed with its body.
+   */
+  private httpGet(command: HttpGetCommand): Array<string> {
+    const deadline = this.sim.now + this.ncTimeoutUs;
+    const chunks: Array<Uint8Array> = [];
+    let connected = false;
+    const request = httpRequestBytes(command);
+    const socket = new TcpSocket({
+      host: this.host,
+      sim: this.sim,
+      onData: (data) => {
+        if (this.sim.now <= deadline) {
+          chunks.push(data);
+        }
+      },
+      onStateChange: (state) => {
+        if (state !== "ESTABLISHED") {
+          return;
+        }
+        connected = true;
+        socket.send(request);
+      },
+    });
+    socket.connect(command.host, command.port);
+    this.sim.runUntil(deadline);
+    const state = socket.state;
+    socket.close();
+    if (!connected) {
+      throw new ShellCommandError(
+        shellError(
+          "execution_failed",
+          "curl",
+          state === "CLOSED"
+            ? `connection refused: ${command.host}:${command.port}`
+            : `no answer from ${command.host}:${command.port}`,
+        ),
+      );
+    }
+    const response = parseHttpResponse(concatBytes(chunks));
+    if (response === undefined) {
+      throw new ShellCommandError(
+        shellError(
+          "execution_failed",
+          "curl",
+          `malformed HTTP response from ${command.host}:${command.port}`,
+        ),
+      );
+    }
+    return formatHttpGetLines(response);
   }
 
   /** `@server`, then the configured resolver, then the gateway on port 53. */

@@ -21,8 +21,10 @@ export const DEFAULT_PING_TTL = 64;
 export const MAX_PING_SIZE = 65507;
 /** Largest request count: sequences are 16-bit. */
 export const MAX_PING_COUNT = 65535;
-/** Largest UDP payload `nc -u` accepts: the IPv4 datagram limit. */
+/** Largest payload `nc` accepts: the IPv4 datagram limit. */
 export const MAX_NC_PAYLOAD_BYTES = 65507;
+/** Port `http-server` and `curl` use when none is given. */
+export const DEFAULT_HTTP_PORT = 80;
 
 /** One DNS label: alphanumeric, internal hyphens, 1..63 characters. */
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
@@ -98,6 +100,35 @@ export interface NcUdpCommand {
   readonly payload: string;
 }
 
+export interface NcTcpCommand {
+  readonly kind: "nc.tcp";
+  readonly host: string;
+  readonly port: number;
+  /** Lowercase hex payload; empty sends no data after the handshake. */
+  readonly payload: string;
+}
+
+/** `ss`: live TCP sockets of the host, no arguments. */
+export interface SsCommand {
+  readonly kind: "ss";
+}
+
+/** `http-server [PORT]`: serve a fixed HTTP/1.0 page from the host. */
+export interface HttpServerCommand {
+  readonly kind: "http.server";
+  /** Listening port; absent means {@link DEFAULT_HTTP_PORT}. */
+  readonly port?: number;
+}
+
+/** `curl URL`: one HTTP/1.0 GET with the body printed. */
+export interface HttpGetCommand {
+  readonly kind: "http.get";
+  readonly host: string;
+  readonly port: number;
+  /** Absolute request target, always starting with `/`. */
+  readonly path: string;
+}
+
 export interface HelpCommand {
   readonly kind: "help";
 }
@@ -116,6 +147,10 @@ export type ShellCommand =
   | DigCommand
   | DhclientCommand
   | NcUdpCommand
+  | NcTcpCommand
+  | SsCommand
+  | HttpServerCommand
+  | HttpGetCommand
   | HelpCommand;
 
 /** Parse outcome; failures are data, not exceptions. */
@@ -616,30 +651,36 @@ function parseDhclient(tokens: ReadonlyArray<string>): ShellParseResult {
   return ok({ kind: "dhclient", iface });
 }
 
-/** `nc -u HOST PORT [HEX]`: only the UDP mode is modelled. */
+/**
+ * `nc [-u] HOST PORT [HEX]`: TCP by default, UDP with `-u`.
+ *
+ * Only the transport flag is modelled: listen mode (`-l`) and every other
+ * flag stay typed `unknown_flag`, and the payload is still lowercase hex so
+ * the printed output is stable.
+ */
 function parseNc(tokens: ReadonlyArray<string>): ShellParseResult {
-  const usage = "usage: nc -u HOST PORT [HEX]";
-  const mode = tokens[1];
-  if (mode === undefined) {
+  const usage = "usage: nc [-u] HOST PORT [HEX]";
+  const first = tokens[1];
+  if (first === undefined) {
     return fail("missing_argument", "nc", usage);
   }
-  if (mode !== "-u") {
-    if (mode.startsWith("-")) {
-      return fail("unknown_flag", "nc", `unknown flag: ${mode}`);
-    }
-    return fail("unsupported", "nc", "only UDP mode is supported: nc -u");
+  let udp = false;
+  let hostIndex = 1;
+  if (first === "-u") {
+    udp = true;
+    hostIndex = 2;
+  } else if (first.startsWith("-")) {
+    return fail("unknown_flag", "nc", `unknown flag: ${first}`);
   }
-  const host = tokens[2];
-  const portText = tokens[3];
+  const host = tokens[hostIndex];
+  const portText = tokens[hostIndex + 1];
   if (host === undefined || portText === undefined) {
     return fail("missing_argument", "nc", usage);
   }
-  if (tokens.length > 5) {
-    return fail(
-      "unexpected_argument",
-      "nc",
-      `unexpected argument: ${tokens[5] ?? ""}`,
-    );
+  const payloadIndex = hostIndex + 2;
+  const extra = tokens[payloadIndex + 1];
+  if (extra !== undefined) {
+    return fail("unexpected_argument", "nc", `unexpected argument: ${extra}`);
   }
   if (host.startsWith("-")) {
     return fail("unknown_flag", "nc", `unknown flag: ${host}`);
@@ -651,7 +692,7 @@ function parseNc(tokens: ReadonlyArray<string>): ShellParseResult {
   if (port === undefined || port < 1 || port > 0xffff) {
     return fail("invalid_argument", "nc", `port must be 1..65535: ${portText}`);
   }
-  const payload = tokens[4] ?? "";
+  const payload = tokens[payloadIndex] ?? "";
   if (!/^[0-9a-fA-F]*$/.test(payload)) {
     return fail("invalid_argument", "nc", `payload must be hex: ${payload}`);
   }
@@ -669,12 +710,107 @@ function parseNc(tokens: ReadonlyArray<string>): ShellParseResult {
       `payload must be at most ${MAX_NC_PAYLOAD_BYTES} bytes`,
     );
   }
-  return ok({
-    kind: "nc.udp",
-    host,
-    port,
-    payload: payload.toLowerCase(),
-  });
+  const command = { host, port, payload: payload.toLowerCase() };
+  return ok(
+    udp ? { kind: "nc.udp", ...command } : { kind: "nc.tcp", ...command },
+  );
+}
+
+/** `ss`: no flags and no filters yet, so any argument is a typed rejection. */
+function parseSs(tokens: ReadonlyArray<string>): ShellParseResult {
+  const argument = tokens[1];
+  if (argument === undefined) {
+    return ok({ kind: "ss" });
+  }
+  if (argument.startsWith("-")) {
+    return fail("unknown_flag", "ss", `unknown flag: ${argument}`);
+  }
+  return fail("unexpected_argument", "ss", `unexpected argument: ${argument}`);
+}
+
+/** `http-server [PORT]`: one optional listening port, nothing else. */
+function parseHttpServer(tokens: ReadonlyArray<string>): ShellParseResult {
+  const portText = tokens[1];
+  if (portText === undefined) {
+    return ok({ kind: "http.server" });
+  }
+  if (portText.startsWith("-")) {
+    return fail("unknown_flag", "http-server", `unknown flag: ${portText}`);
+  }
+  const extra = tokens[2];
+  if (extra !== undefined) {
+    return fail(
+      "unexpected_argument",
+      "http-server",
+      `unexpected argument: ${extra}`,
+    );
+  }
+  const port = parseInteger(portText);
+  if (port === undefined || port < 1 || port > 0xffff) {
+    return fail(
+      "invalid_argument",
+      "http-server",
+      `port must be 1..65535: ${portText}`,
+    );
+  }
+  return ok({ kind: "http.server", port });
+}
+
+/**
+ * `curl http://HOST[:PORT][/PATH]`, with the scheme optional.
+ *
+ * The lab shell has no name service in the parser, so the host must be an
+ * IPv4 literal; `https://` is an explicit `unsupported` (there is no TLS on
+ * this stack), and the path defaults to `/`. The URL is one token: everything
+ * after the authority is the request target.
+ */
+function parseCurl(tokens: ReadonlyArray<string>): ShellParseResult {
+  const usage = "usage: curl http://HOST[:PORT][/PATH]";
+  const url = tokens[1];
+  if (url === undefined) {
+    return fail("missing_argument", "curl", usage);
+  }
+  if (url.startsWith("-")) {
+    return fail("unknown_flag", "curl", `unknown flag: ${url}`);
+  }
+  const extra = tokens[2];
+  if (extra !== undefined) {
+    return fail("unexpected_argument", "curl", `unexpected argument: ${extra}`);
+  }
+  let rest = url;
+  if (rest.startsWith("http://")) {
+    rest = rest.slice("http://".length);
+  } else if (rest.includes("://")) {
+    return fail("unsupported", "curl", `only http:// is supported: ${url}`);
+  }
+  const slash = rest.indexOf("/");
+  const authority = slash === -1 ? rest : rest.slice(0, slash);
+  const path = slash === -1 ? "/" : rest.slice(slash);
+  if (authority.length === 0) {
+    return fail("missing_argument", "curl", `URL has no host: ${url}`);
+  }
+  if (path.length === 0) {
+    return fail("invalid_argument", "curl", `invalid request target: ${url}`);
+  }
+  const colon = authority.indexOf(":");
+  const host = colon === -1 ? authority : authority.slice(0, colon);
+  const portText = colon === -1 ? undefined : authority.slice(colon + 1);
+  if (!isIpv4(host)) {
+    return fail("invalid_argument", "curl", `invalid host: ${host}`);
+  }
+  let port = DEFAULT_HTTP_PORT;
+  if (portText !== undefined) {
+    const parsed = parseInteger(portText);
+    if (parsed === undefined || parsed < 1 || parsed > 0xffff) {
+      return fail(
+        "invalid_argument",
+        "curl",
+        `port must be 1..65535: ${portText}`,
+      );
+    }
+    port = parsed;
+  }
+  return ok({ kind: "http.get", host, port, path });
 }
 
 function parse(line: string): ShellParseResult {
@@ -697,6 +833,12 @@ function parse(line: string): ShellParseResult {
       return parseDhclient(tokens);
     case "nc":
       return parseNc(tokens);
+    case "ss":
+      return parseSs(tokens);
+    case "http-server":
+      return parseHttpServer(tokens);
+    case "curl":
+      return parseCurl(tokens);
     case "arp":
       return parseArp(tokens);
     case "help":
