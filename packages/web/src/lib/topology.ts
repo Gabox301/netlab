@@ -337,6 +337,97 @@ export function duplicateNodes(
   return { topology: current, names: freshNames, linkIds };
 }
 
+/* ------------------------------------------------------------------------- */
+/* Align (F-84): snap node edges/centers to a shared line.                   */
+/* ------------------------------------------------------------------------- */
+
+export type AlignMode =
+  | "left"
+  | "centerX"
+  | "right"
+  | "top"
+  | "centerY"
+  | "bottom";
+
+export const ALIGN_MODES: ReadonlyArray<AlignMode> = [
+  "left",
+  "centerX",
+  "right",
+  "top",
+  "centerY",
+  "bottom",
+];
+
+/**
+ * Move the named nodes to a shared x/y, returning a new topology.
+ * Unknown names are ignored; with fewer than two matches the topology is
+ * returned untouched (no-op, so the UI can skip the undo step).
+ */
+export function alignNodes(
+  topology: Topology,
+  names: Array<string>,
+  mode: AlignMode,
+): Topology {
+  const targets = new Set(
+    topology.nodes
+      .filter((node) => names.includes(node.name))
+      .map((node) => node.name),
+  );
+  if (targets.size < 2) {
+    return topology;
+  }
+  const placed = new Map(
+    topology.nodes
+      .filter((node) => targets.has(node.name))
+      .map((node) => [node.name, node] as const),
+  );
+  const at = (name: string): number => {
+    const node = placed.get(name);
+    if (node === undefined) {
+      throw new Error(`no existe el dispositivo "${name}"`);
+    }
+    return mode === "left" || mode === "centerX" || mode === "right"
+      ? node.x
+      : node.y;
+  };
+  const size =
+    mode === "left" || mode === "centerX" || mode === "right"
+      ? NODE_WIDTH
+      : NODE_HEIGHT;
+  const edges = [...targets].map((name) => at(name));
+  const lines = [...targets].map((name) => at(name) + size);
+  const min = Math.min(...edges);
+  const max = Math.max(...lines);
+  const mean = (values: Array<number>): number =>
+    values.reduce((acc, value) => acc + value, 0) / values.length;
+  const line = (() => {
+    switch (mode) {
+      case "left":
+      case "top":
+        return min;
+      case "right":
+      case "bottom":
+        return max - size;
+      case "centerX":
+      case "centerY":
+        return Math.round(
+          mean([...targets].map((name) => at(name) + size / 2)) - size / 2,
+        );
+    }
+  })();
+  return {
+    ...topology,
+    nodes: topology.nodes.map((node) => {
+      if (!targets.has(node.name)) {
+        return node;
+      }
+      return mode === "left" || mode === "centerX" || mode === "right"
+        ? { ...node, x: line }
+        : { ...node, y: line };
+    }),
+  };
+}
+
 export type DeviceKind = "host" | "switch" | "router" | "hub";
 
 export const DEVICE_KINDS: ReadonlyArray<DeviceKind> = [

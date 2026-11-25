@@ -1,10 +1,13 @@
 <script lang="ts">
 import type { ScenarioPingAction } from "../../lib/topology";
 import {
+  ALIGN_MODES,
+  type AlignMode,
   addInterface,
   addLink,
   addNode,
   addRoute,
+  alignNodes,
   applyLinkPreset,
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
@@ -82,11 +85,33 @@ const MIN_Y = 8;
 const MAX_X = CANVAS_WIDTH - NODE_WIDTH - MIN_X;
 const MAX_Y = CANVAS_HEIGHT - NODE_HEIGHT - MIN_Y;
 
+/** Short button labels for the align panel (one per `ALIGN_MODES` entry). */
+const ALIGN_LABEL: Record<AlignMode, string> = {
+  left: "Izq",
+  centerX: "Centro",
+  right: "Der",
+  top: "Arriba",
+  centerY: "Medio",
+  bottom: "Abajo",
+};
+
+/** Prepositional phrases so titles and notices read naturally per axis. */
+const ALIGN_WHERE: Record<AlignMode, string> = {
+  left: "a la izquierda",
+  centerX: "al centro horizontal",
+  right: "a la derecha",
+  top: "arriba",
+  centerY: "al centro vertical",
+  bottom: "abajo",
+};
+
 let topology = $state<Topology>(exampleTopology());
 let history = $state<TopologyHistory>(createHistory());
 /** True while a drag/key-hold/text session shares one undo step. */
 let coalescing = false;
 let selection = $state<Selection>(null);
+/** Extra nodes picked with Shift+click, beyond the primary selection. */
+let extraSelected = $state<Array<string>>([]);
 let tool = $state<Tool>("select");
 let pending = $state<TopologyEndpoint | null>(null);
 let cableCursor = $state<{ x: number; y: number } | null>(null);
@@ -113,6 +138,14 @@ let clipboard = $state<Array<string> | null>(null);
 
 const selectedNode = $derived(selectedNodeOf());
 const selectedLink = $derived(selectedLinkOf());
+/** Nodes the align panel would move: primary node plus Shift-picked extras. */
+const alignTargets = $derived.by(() => {
+  const names = new Set(extraSelected);
+  if (selection?.kind === "node") {
+    names.add(selection.name);
+  }
+  return topology.nodes.filter((node) => names.has(node.name));
+});
 const canUndo = $derived(canUndoHistory(history));
 const canRedo = $derived(canRedoHistory(history));
 const canCopy = $derived(selectedNode !== null);
@@ -186,6 +219,7 @@ function applyHistoryStep(snapshot: Topology, text: string): void {
   cableCursor = null;
   nodeDrag = null;
   paletteDrag = null;
+  extraSelected = [];
   coalescing = false;
   setNotice("info", text);
 }
@@ -245,6 +279,7 @@ function onPasteClipboard(): void {
     const first = pasted.names[0];
     if (first !== undefined) {
       selection = { kind: "node", name: first };
+      extraSelected = [];
     }
     const devices = plural(
       pasted.names.length,
@@ -346,6 +381,7 @@ function loadTopology(next: Topology, text: string): void {
   coalescing = false;
   topology = next;
   selection = null;
+  extraSelected = [];
   pending = null;
   cableCursor = null;
   tool = "select";
@@ -371,6 +407,7 @@ function placeNode(kind: DeviceKind, x: number, y: number): void {
   checkpoint();
   topology = placed.topology;
   selection = { kind: "node", name: placed.name };
+  extraSelected = [];
   setNotice("ok", `${kindLabel(kind)} ${placed.name} agregado al lienzo.`);
 }
 
@@ -471,6 +508,25 @@ function onCanvasPointerDown(): void {
   pending = null;
   cableCursor = null;
   selection = null;
+  extraSelected = [];
+}
+
+/**
+ * Shift+click: grow/shrink the align set instead of replacing the selection.
+ * Shift+clicking the only selected node drops it, so the gesture toggles.
+ */
+function toggleExtra(name: string): void {
+  if (
+    selection?.kind === "node" &&
+    selection.name === name &&
+    extraSelected.length === 0
+  ) {
+    selection = null;
+    return;
+  }
+  extraSelected = extraSelected.includes(name)
+    ? extraSelected.filter((candidate) => candidate !== name)
+    : [...extraSelected, name];
 }
 
 function onNodePointerDown(event: PointerEvent, node: TopologyNode): void {
@@ -478,7 +534,12 @@ function onNodePointerDown(event: PointerEvent, node: TopologyNode): void {
   if (event.button !== 0) {
     return;
   }
+  if (event.shiftKey) {
+    toggleExtra(node.name);
+    return;
+  }
   selection = { kind: "node", name: node.name };
+  extraSelected = [];
   if (tool === "cable") {
     return;
   }
@@ -499,6 +560,7 @@ function onNodeKeyDown(event: KeyboardEvent, node: TopologyNode): void {
   if (event.key === "Enter" || event.key === " ") {
     event.preventDefault();
     selection = { kind: "node", name: node.name };
+    extraSelected = [];
     return;
   }
   const step = event.shiftKey ? 32 : 8;
@@ -523,6 +585,7 @@ function onNodeKeyDown(event: KeyboardEvent, node: TopologyNode): void {
   current.x = clamp(current.x + delta[0], MIN_X, MAX_X);
   current.y = clamp(current.y + delta[1], MIN_Y, MAX_Y);
   selection = { kind: "node", name: node.name };
+  extraSelected = [];
 }
 
 function onPortPointerDown(
@@ -534,6 +597,7 @@ function onPortPointerDown(
   event.stopPropagation();
   if (tool !== "cable") {
     selection = { kind: "node", name: node.name };
+    extraSelected = [];
     return;
   }
   const point = toSvgPoint(event.clientX, event.clientY);
@@ -554,6 +618,7 @@ function onPortKeyDown(
   event.preventDefault();
   if (tool !== "cable") {
     selection = { kind: "node", name: node.name };
+    extraSelected = [];
     return;
   }
   cableCursor = interfaceAnchor(node, ifaceName);
@@ -589,6 +654,7 @@ function activatePort(node: TopologyNode, ifaceName: string): void {
     pending = null;
     cableCursor = null;
     selection = { kind: "link", id: linked.id };
+    extraSelected = [];
     setNotice(
       "ok",
       `Cable ${linked.id}: ${endpointLabel(from)} ↔ ${endpointLabel(endpoint)}.`,
@@ -605,6 +671,7 @@ function onSelectLink(event: PointerEvent, id: string): void {
   pending = null;
   cableCursor = null;
   selection = { kind: "link", id };
+  extraSelected = [];
 }
 
 function onLinkKeyDown(event: KeyboardEvent, id: string): void {
@@ -615,6 +682,7 @@ function onLinkKeyDown(event: KeyboardEvent, id: string): void {
   pending = null;
   cableCursor = null;
   selection = { kind: "link", id };
+  extraSelected = [];
 }
 
 function toggleCable(): void {
@@ -726,6 +794,9 @@ function onRenameNode(node: TopologyNode, event: Event): void {
     checkpoint();
     topology = next;
     selection = { kind: "node", name: input.value.trim() };
+    extraSelected = extraSelected.map((name) =>
+      name === node.name ? input.value.trim() : name,
+    );
     setNotice("ok", `Dispositivo renombrado a ${input.value.trim()}.`);
   } catch (error) {
     input.value = node.name;
@@ -849,13 +920,26 @@ function onRemoveNode(node: TopologyNode): void {
   checkpoint();
   topology = removeNode(topology, node.name);
   selection = null;
+  extraSelected = extraSelected.filter((name) => name !== node.name);
   setNotice("ok", `${node.name} eliminado del lienzo.`);
+}
+
+function onAlign(mode: AlignMode): void {
+  const names = [...new Set(alignTargets.map((node) => node.name))];
+  if (names.length < 2) {
+    setNotice("info", "Elegí al menos dos dispositivos para alinear.");
+    return;
+  }
+  checkpoint();
+  topology = alignNodes(topology, names, mode);
+  setNotice("ok", `Alineados ${names.length} ${ALIGN_WHERE[mode]}.`);
 }
 
 function onRemoveSelectedLink(link: TopologyLink): void {
   checkpoint();
   topology = removeLink(topology, link.id);
   selection = null;
+  extraSelected = [];
   setNotice("ok", `Cable ${link.id} eliminado.`);
 }
 
@@ -877,6 +961,7 @@ function onApplyPreset(link: TopologyLink, preset: LinkPresetId): void {
     checkpoint();
     topology = next;
     selection = { kind: "link", id: link.id };
+    extraSelected = [];
     setNotice(
       "ok",
       `Cable ${link.id}: preset ${LINK_PRESETS[preset].label} aplicado.`,
@@ -1244,8 +1329,8 @@ function exportJson(): void {
       {#each topology.nodes as node (node.name)}
         <g
           class="node-g"
-          class:sel={selection?.kind === "node" &&
-            selection.name === node.name}
+          class:sel={extraSelected.includes(node.name) ||
+            (selection?.kind === "node" && selection.name === node.name)}
           class:dragging={nodeDrag?.name === node.name}
           role="button"
           tabindex="0"
@@ -1401,6 +1486,23 @@ function exportJson(): void {
     </nav>
 
     <aside class="inspector" aria-label="Propiedades" onfocusout={endCoalesced}>
+      {#if alignTargets.length >= 2}
+        <div class="sec">
+          <h3>Alinear · {alignTargets.length}</h3>
+          <span class="row">
+            {#each ALIGN_MODES as mode (mode)}
+              <button
+                type="button"
+                class="mini"
+                title={`Alinear ${ALIGN_WHERE[mode]}`}
+                onclick={() => onAlign(mode)}
+              >
+                {ALIGN_LABEL[mode]}
+              </button>
+            {/each}
+          </span>
+        </div>
+      {/if}
       {#if selectedNode}
         {@const node = selectedNode}
         <div class="ins-head">
@@ -2399,6 +2501,12 @@ function exportJson(): void {
     border: 1px solid var(--line);
     z-index: 4;
     overflow: hidden;
+  }
+
+  /* Align panel sits above the inspector body, so give it its own frame. */
+  .inspector > .sec {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
   }
 
   .ins-head {
