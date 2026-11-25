@@ -51,6 +51,120 @@ export const NODE_HEIGHT = 68;
 /** Link latency used by new cables; matches the CLI fixtures. */
 export const DEFAULT_LATENCY_US = 10;
 
+export type LinkPresetId =
+  | "lan-ideal"
+  | "wifi-inestable"
+  | "satelite"
+  | "wan-congestionada";
+
+export interface LinkPreset {
+  id: LinkPresetId;
+  label: string;
+  hint: string;
+  params: LinkParams;
+}
+
+/**
+ * F-83 presets with core field names (`burst`, `mtuBytes`; the roadmap
+ * calls them `burstLoss`, `mtu`). Values are engineering-plausible
+ * defaults, not measurements: LAN ideal zeroes impairments; WiFi models
+ * bursty loss with jitter and reorder; satélite is propagation-dominated;
+ * WAN congestionada caps bandwidth with a short queue so frames drop
+ * with `queue_full` under load.
+ */
+export const LINK_PRESETS: Record<LinkPresetId, LinkPreset> = {
+  "lan-ideal": {
+    id: "lan-ideal",
+    label: "LAN ideal",
+    hint: "Sin impairments: latencia mínima, cero pérdida.",
+    params: {
+      latencyUs: 10,
+      jitterUs: 0,
+      lossRate: 0,
+      reorderRate: 0,
+      duplicateRate: 0,
+      corruptRate: 0,
+    },
+  },
+  "wifi-inestable": {
+    id: "wifi-inestable",
+    label: "WiFi inestable",
+    hint: "Pérdida en ráfagas + jitter y reorden.",
+    params: {
+      latencyUs: 5000,
+      jitterUs: 2000,
+      burst: { pGoodToBad: 0.02, pBadToGood: 0.4 },
+      reorderRate: 0.01,
+      duplicateRate: 0.005,
+      corruptRate: 0.002,
+    },
+  },
+  satelite: {
+    id: "satelite",
+    label: "Satélite",
+    hint: "Propagación alta, pérdida leve.",
+    params: {
+      latencyUs: 250_000,
+      jitterUs: 10_000,
+      lossRate: 0.005,
+      reorderRate: 0,
+      duplicateRate: 0,
+      corruptRate: 0.001,
+    },
+  },
+  "wan-congestionada": {
+    id: "wan-congestionada",
+    label: "Enlace WAN congestionado",
+    hint: "Ancho limitado + cola corta: pierde por cola llena.",
+    params: {
+      latencyUs: 30_000,
+      jitterUs: 5000,
+      lossRate: 0.01,
+      reorderRate: 0.005,
+      duplicateRate: 0.002,
+      corruptRate: 0.001,
+      bandwidthBps: 10_000_000,
+      mtuBytes: 1500,
+      queueLimit: 10,
+    },
+  },
+};
+
+export const LINK_PRESET_IDS: ReadonlyArray<LinkPresetId> = [
+  "lan-ideal",
+  "wifi-inestable",
+  "satelite",
+  "wan-congestionada",
+];
+
+/** Replace a cable's params with a preset copy; keeps id and endpoints. */
+export function applyLinkPreset(
+  topology: Topology,
+  linkId: string,
+  presetId: LinkPresetId,
+): Topology {
+  const preset = LINK_PRESETS[presetId];
+  if (preset === undefined) {
+    throw new Error(`preset desconocido "${presetId}"`);
+  }
+  let found = false;
+  const links = topology.links.map((link) => {
+    if (link.id !== linkId) {
+      return link;
+    }
+    found = true;
+    const params: LinkParams = { ...preset.params };
+    if (preset.params.burst !== undefined) {
+      params.burst = { ...preset.params.burst };
+    }
+    return { ...link, a: { ...link.a }, b: { ...link.b }, params };
+  });
+  if (!found) {
+    throw new Error(`no existe el cable "${linkId}"`);
+  }
+  return { ...topology, links };
+}
+
 export type DeviceKind = "host" | "switch" | "router" | "hub";
 
 export const DEVICE_KINDS: ReadonlyArray<DeviceKind> = [
@@ -119,7 +233,7 @@ export interface TopologyLink {
   id: string;
   a: TopologyEndpoint;
   b: TopologyEndpoint;
-  /** Full v1 params are preserved on import; the UI edits `latencyUs`. */
+  /** Full v1 params are preserved on import; the link panel edits them (F-83). */
   params: LinkParams;
 }
 
@@ -970,16 +1084,78 @@ function linkToScenario(
   path: string,
 ): ScenarioLink {
   const id = requireText(link.id, `${path}.id`);
-  const latency = link.params.latencyUs;
-  if (!Number.isFinite(latency) || latency < 0) {
-    throw fail(`${path}.params.latencyUs`, `latencia inválida: ${latency}`);
-  }
+  validateLinkParams(link.params, path);
   return {
     id,
     a: endpointToScenario(link.a, nodes, `${path}.a`),
     b: endpointToScenario(link.b, nodes, `${path}.b`),
     params: { ...link.params },
   };
+}
+
+/**
+ * Early gate mirroring the core `resolveParams` ranges, so a bad preset or
+ * hand edit fails here with a field path instead of inside `netlab run`.
+ * `queueLimit` admits only a positive integer when set: the in-memory
+ * `Infinity` default has no JSON representation (`null` after stringify).
+ */
+function validateLinkParams(params: LinkParams, path: string): void {
+  const base = `${path}.params`;
+  if (!Number.isFinite(params.latencyUs) || params.latencyUs < 0) {
+    throw fail(`${base}.latencyUs`, `latencia inválida: ${params.latencyUs}`);
+  }
+  if (
+    params.jitterUs !== undefined &&
+    (!Number.isFinite(params.jitterUs) || params.jitterUs < 0)
+  ) {
+    throw fail(`${base}.jitterUs`, `jitter inválido: ${params.jitterUs}`);
+  }
+  for (const name of [
+    "lossRate",
+    "reorderRate",
+    "duplicateRate",
+    "corruptRate",
+  ] as const) {
+    const value = params[name];
+    if (
+      value !== undefined &&
+      (!Number.isFinite(value) || value < 0 || value > 1)
+    ) {
+      throw fail(`${base}.${name}`, `probabilidad inválida: ${value}`);
+    }
+  }
+  if (params.burst !== undefined) {
+    for (const name of ["pGoodToBad", "pBadToGood"] as const) {
+      const value = params.burst[name];
+      if (!Number.isFinite(value) || value < 0 || value > 1) {
+        throw fail(`${base}.burst.${name}`, `probabilidad inválida: ${value}`);
+      }
+    }
+  }
+  if (
+    params.bandwidthBps !== undefined &&
+    (!Number.isFinite(params.bandwidthBps) || params.bandwidthBps <= 0)
+  ) {
+    throw fail(
+      `${base}.bandwidthBps`,
+      `ancho de banda inválido: ${params.bandwidthBps}`,
+    );
+  }
+  if (
+    params.mtuBytes !== undefined &&
+    (!Number.isInteger(params.mtuBytes) || params.mtuBytes <= 0)
+  ) {
+    throw fail(`${base}.mtuBytes`, `MTU inválida: ${params.mtuBytes}`);
+  }
+  if (
+    params.queueLimit !== undefined &&
+    (!Number.isInteger(params.queueLimit) || params.queueLimit <= 0)
+  ) {
+    throw fail(
+      `${base}.queueLimit`,
+      `límite de cola inválido: ${params.queueLimit}`,
+    );
+  }
 }
 
 function actionToScenario(

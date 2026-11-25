@@ -9,9 +9,12 @@ import {
 import {
   addLink,
   addNode,
+  applyLinkPreset,
   canConnect,
   emptyTopology,
   exampleTopology,
+  LINK_PRESET_IDS,
+  LINK_PRESETS,
   removeInterface,
   renameInterface,
   renameNode,
@@ -318,4 +321,142 @@ describe("scenario import and round-trip (S4)", () => {
       expect(result.processed).toBeGreaterThan(0);
     });
   }
+});
+
+describe("link presets (F-83)", () => {
+  test("ships the four roadmap profiles with core field names", () => {
+    expect(LINK_PRESET_IDS).toEqual([
+      "lan-ideal",
+      "wifi-inestable",
+      "satelite",
+      "wan-congestionada",
+    ]);
+    expect(LINK_PRESETS["lan-ideal"]?.label).toBe("LAN ideal");
+    expect(LINK_PRESETS["wifi-inestable"]?.label).toBe("WiFi inestable");
+    expect(LINK_PRESETS.satelite.label).toBe("Satélite");
+    expect(LINK_PRESETS["wan-congestionada"]?.label).toBe(
+      "Enlace WAN congestionado",
+    );
+    // Core names, never the roadmap prose names.
+    const dumped = JSON.stringify(LINK_PRESETS);
+    expect(dumped).not.toContain("burstLoss");
+    expect(dumped).not.toContain('"mtu"');
+    expect(LINK_PRESETS["wifi-inestable"]?.params.burst).toMatchObject({
+      pGoodToBad: 0.02,
+      pBadToGood: 0.4,
+    });
+    expect(
+      LINK_PRESETS["wan-congestionada"]?.params.bandwidthBps,
+    ).toBeGreaterThan(0);
+  });
+
+  test("applyLinkPreset replaces params but keeps endpoints", () => {
+    const base = exampleTopology();
+    const before = base.links[0];
+    if (before === undefined) {
+      throw new Error("fixture sin cables");
+    }
+    const next = applyLinkPreset(base, before.id, "satelite");
+    const after = next.links.find((link) => link.id === before.id);
+    expect(after?.a).toEqual(before.a);
+    expect(after?.b).toEqual(before.b);
+    expect(after?.params.latencyUs).toBe(250_000);
+    // The wifi burst clone never leaks back into the preset table.
+    const wifi = applyLinkPreset(base, before.id, "wifi-inestable");
+    const wifiLink = wifi.links[0];
+    if (wifiLink?.params.burst !== undefined) {
+      wifiLink.params.burst.pGoodToBad = 0.9;
+    }
+    expect(LINK_PRESETS["wifi-inestable"]?.params.burst).toMatchObject({
+      pGoodToBad: 0.02,
+    });
+  });
+
+  test("exported presets pass the CLI gate and run", async () => {
+    const topology = applyLinkPreset(exampleTopology(), "l1", "lan-ideal");
+    const { scenario } = topologyToScenarioJson(topology);
+    expect(scenario.links[0]?.params.latencyUs).toBe(10);
+    const result = await runScenario(scenario);
+    expect(result.processed).toBeGreaterThan(0);
+  });
+
+  test("wifi and wan presets survive export -> parse -> import", () => {
+    for (const preset of ["wifi-inestable", "wan-congestionada"] as const) {
+      const topology = applyLinkPreset(exampleTopology(), "l1", preset);
+      const { scenario } = topologyToScenarioJson(topology);
+      const parsed = parseScenarioJson(JSON.parse(JSON.stringify(scenario)));
+      const rebuilt = scenarioToTopology(parsed);
+      expect(rebuilt.links[0]?.params).toEqual(
+        applyLinkPreset(exampleTopology(), "l1", preset).links[0]?.params,
+      );
+    }
+  });
+
+  test("export still rejects a negative latency", () => {
+    const topology = exampleTopology();
+    const link = topology.links[0];
+    if (link === undefined) {
+      throw new Error("fixture sin cables");
+    }
+    link.params.latencyUs = -1;
+    expect(() => topologyToScenario(topology)).toThrow(/latencyUs/);
+  });
+
+  test("export rejects out-of-range impairments before the CLI gate", () => {
+    const cases: Array<[string, (params: Record<string, unknown>) => void]> = [
+      [
+        "lossRate",
+        (params) => {
+          params.lossRate = 2;
+        },
+      ],
+      [
+        "jitterUs",
+        (params) => {
+          params.jitterUs = -1;
+        },
+      ],
+      [
+        "reorderRate",
+        (params) => {
+          params.reorderRate = 1.5;
+        },
+      ],
+      [
+        "bandwidthBps",
+        (params) => {
+          params.bandwidthBps = 0;
+        },
+      ],
+      [
+        "mtuBytes",
+        (params) => {
+          params.mtuBytes = 0;
+        },
+      ],
+      [
+        "queueLimit",
+        (params) => {
+          params.queueLimit = 0;
+        },
+      ],
+      [
+        "burst.pBadToGood",
+        (params) => {
+          params.burst = { pGoodToBad: 0.02, pBadToGood: 2 };
+        },
+      ],
+    ];
+    for (const [name, mutate] of cases) {
+      const topology = exampleTopology();
+      const link = topology.links[0];
+      if (link === undefined) {
+        throw new Error("fixture sin cables");
+      }
+      mutate(link.params as unknown as Record<string, unknown>);
+      expect(() => topologyToScenario(topology), name).toThrow(
+        new RegExp(name.replace(/\..*$/, "")),
+      );
+    }
+  });
 });
