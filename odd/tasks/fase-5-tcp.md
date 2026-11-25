@@ -13,7 +13,7 @@ Slice vertical ODD sobre netlab-roadmap.md § Fase 5. Sin atajos: parsers totale
 - [x] T2 (S1) Hito 5.2: buffers, envío/recepción ordenados, ACKs acumulativos (F-56).
 - [x] T3 (S1) Hito 5.3: ventana deslizante y control de flujo (F-57).
 - [x] T4 (S1) Hito 5.4: RTO, retransmisión y fast retransmit (F-58).
-- [ ] T5 (S1) Hito 5.5: Reno — slow start, congestion avoidance, fast recovery (F-59). Commit.
+- [x] T5 (S1) Hito 5.5: Reno — slow start, congestion avoidance, fast recovery (F-59).
 - [ ] T6 (S1) Hito 5.6: API de sockets, `nc`, `ss`, HTTP sobre TCP (F-61, F-74, F-75). Commit.
 
 ## Log

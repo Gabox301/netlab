@@ -16,14 +16,14 @@
  * Scope of hito 5.3 — the sliding window and flow control:
  *
  * - Sender. The bytes in flight are the ones with `SND.NXT - SND.UNA` below
- *   `min(sendWindow, SND.WND)`, where SND.WND is the window the peer last
- *   advertised (taken from the SYN and then from every *valid* ACK, i.e. every
- *   ACK in `[SND.UNA, SND.NXT]`, duplicates included — a duplicate ACK is a
- *   legal carrier for a window update). `sendWindow` is the fixed stand-in for
- *   `cwnd`: congestion control (5.5) is out of scope, so it stays frozen at
- *   its configured value instead of growing or backing off. A queued chunk is
- *   truncated to whatever window space is left, so a window that is not a
- *   multiple of the MSS still makes progress.
+ *   the effective send window, `min(cwnd, sendWindow, SND.WND)`, where SND.WND
+ *   is the window the peer last advertised (taken from the SYN and then from
+ *   every *valid* ACK, i.e. every ACK in `[SND.UNA, SND.NXT]`, duplicates
+ *   included — a duplicate ACK is a legal carrier for a window update).
+ *   `sendWindow` was the fixed stand-in for `cwnd` in this milestone; hito 5.5
+ *   replaced it with a real congestion window and left it as the configured
+ *   top. A queued chunk is truncated to whatever window space is left, so a
+ *   window that is not a multiple of the MSS still makes progress.
  * - Zero-window probing. When SND.WND reaches zero with data still queued, a
  *   *fixed-interval persist timer* (`zeroWindowProbeUs`) sends the first
  *   pending byte at SND.NXT without spending sequence space and re-arms
@@ -51,14 +51,45 @@
  *   SND.UNA drops the copies it covers, puts the timeout back to `rtoUs` and
  *   restarts the timer for whatever is still outstanding. Timeouts do **not**
  *   produce an RTT sample (Karn's rule: a resent segment is ambiguous), so the
- *   base value stays fixed; measuring RTT belongs to hito 5.5.
+ *   base value stays fixed; an estimator on top of it is not in this
+ *   milestone.
  * - Fast retransmit. Three duplicate ACKs at SND.UNA mean the head segment is
  *   missing while later ones got through, so it is resent immediately instead
- *   of waiting for the timer. There is no fast recovery: the window does not
- *   shrink and the RTO is not reset — congestion control is hito 5.5.
+ *   of waiting for the timer.
  *
- * Still out of scope: congestion control (5.5) — `sendWindow` (the stand-in
- * for `cwnd`) never grows and never backs off. Control traffic does not gate
+ * Scope of hito 5.5 — congestion control, classic Reno (RFC 5681):
+ *
+ * - `cwnd` is a byte count that starts at one MSS when the connection opens
+ *   and `ssthresh` starts at the configured top (`sendWindow`), the only
+ *   ceiling a lossless path can meet. The bytes allowed in flight are
+ *   `min(cwnd, SND.WND, sendWindow)`: **cwnd is the congestion limit and the
+ *   one that reacts to loss**, SND.WND is the peer's flow-control window, and
+ *   `sendWindow` is the operator's fixed top — it stopped being the cwnd
+ *   stand-in of hito 5.3 and now only bounds how much this socket may ever put
+ *   in flight.
+ * - Slow start: every ACK that advances SND.UNA adds `min(acked, MSS)` to cwnd
+ *   while `cwnd < ssthresh`, so the window doubles every round trip. Once
+ *   `cwnd >= ssthresh` comes congestion avoidance (AIMD's additive part): the
+ *   same ACK adds `MSS*MSS/cwnd`, about one MSS per round trip.
+ * - Timeout: an RTO is a loss the duplicates did not report, so it halves the
+ *   window (Tahoe behaviour): `ssthresh = max(2*MSS, cwnd/2)`, `cwnd = 1 MSS`
+ *   and slow start starts over. Repeated timeouts keep halving ssthresh from
+ *   the standby one-MSS window, i.e. they floor it at `2*MSS`.
+ * - Fast recovery: the third duplicate ACK (the one that already fast
+ *   retransmits) sets `ssthresh = max(2*MSS, cwnd/2)` and inflates `cwnd` to
+ *   `ssthresh + 3*MSS`, because three segments left the network and sit in the
+ *   peer's buffer. Each further duplicate ACK inflates one more MSS, which is
+ *   what lets new data leave while the hole is repaired. The first ACK that
+ *   covers new data deflates `cwnd` back to `ssthresh` and returns to
+ *   congestion avoidance. No SACK and no NewReno partial-ACK handling: one
+ *   advancing ACK is taken as the end of recovery.
+ * - Observability. `cwnd` and `ssthresh` are public getters and every change is
+ *   published on the `TraceBus` given to the socket as a `state()` record in
+ *   the same `key=value` mold the router uses, so the UI/CLI can plot the
+ *   sawtooth. Hosts keep their bus private, so a caller that wants these
+ *   samples passes the same bus it handed the host.
+ *
+ * Still out of scope: the socket/HTTP API (5.6). Control traffic does not gate
  * on data: FIN is queued behind outstanding data and only leaves once the peer
  * has acknowledged every byte.
  *
@@ -77,6 +108,7 @@ import {
 } from "@netlab/protocols";
 import type { Host, HostTcpSegment, HostTcpSocket } from "./host";
 import type { Simulation, TimerHandle } from "./sim";
+import type { TraceBus } from "./trace";
 
 /** Connection states of RFC 793 (F-54). */
 export type TcpState =
@@ -99,11 +131,12 @@ export const DEFAULT_TIME_WAIT_US = 60_000_000;
 export const DEFAULT_MSS = 1460;
 
 /**
- * Fixed number of unacknowledged bytes allowed in flight, on top of whatever
- * the peer advertises: the stand-in for `cwnd` in hito 5.2/5.3.
+ * Fixed cap on the bytes this socket may ever put in flight: the operator's
+ * top, on top of `cwnd` and the peer's window.
  *
- * Congestion control (hito 5.5) is out of scope, so this value never grows and
- * never backs off; the effective send window is `min(sendWindow, SND.WND)`.
+ * Since hito 5.5 the effective send window is `min(cwnd, sendWindow, SND.WND)`:
+ * the congestion window moves with the path, SND.WND with the peer's buffer,
+ * and this value is the fixed ceiling that no congestion growth can cross.
  */
 export const DEFAULT_SEND_WINDOW = 4 * DEFAULT_MSS;
 
@@ -164,9 +197,11 @@ export interface TcpSocketOptions {
   /** MSS used to segment `send()` data; default {@link DEFAULT_MSS}. */
   mss?: number;
   /**
-   * Fixed number of unacknowledged bytes allowed in flight; default
-   * {@link DEFAULT_SEND_WINDOW}. Caps the peer's advertised window from above:
-   * the effective send window is `min(sendWindow, SND.WND)`.
+   * Fixed cap on unacknowledged bytes allowed in flight; default
+   * {@link DEFAULT_SEND_WINDOW}. It is the configured top of the effective
+   * send window, `min(cwnd, sendWindow, SND.WND)`, and it no longer stands in
+   * for `cwnd` (hito 5.5): the congestion window is the one that grows and
+   * backs off, this value only bounds it.
    */
   sendWindow?: number;
   /**
@@ -191,6 +226,13 @@ export interface TcpSocketOptions {
   maxRtoUs?: number;
   /** Called with each in-order chunk of received data (a fresh copy). */
   onData?: (data: Uint8Array) => void;
+  /**
+   * Trace bus that receives the congestion `state()` samples (`cwnd`,
+   * `ssthresh`, the phase transition). Hosts keep their own bus private, so a
+   * caller that wants the sawtooth passes the bus it also gave the host.
+   * Without one the connection still works, it just publishes nothing.
+   */
+  bus?: TraceBus;
 }
 
 /** Options for {@link TcpSocket.connect}. */
@@ -262,7 +304,7 @@ export class TcpSocket {
   onData: ((data: Uint8Array) => void) | undefined = undefined;
   /** Segment size used by {@link TcpSocket.send}. */
   readonly mss: number;
-  /** Fixed cap on unacknowledged data, on top of the peer's window. */
+  /** Fixed top on unacknowledged data, above `cwnd` and the peer's window. */
   readonly sendWindow: number;
   /** Receive buffer whose free part is what this socket advertises. */
   readonly receiveCapacity: number;
@@ -272,6 +314,8 @@ export class TcpSocket {
   readonly rtoBaseUs: number;
   /** Ceiling the exponential backoff saturates at. */
   readonly maxRtoUs: number;
+  /** Bus that receives the congestion `state()` samples, if one was given. */
+  readonly bus: TraceBus | undefined;
 
   private readonly initialSequence: number | undefined;
   private readonly timeWaitUs: number;
@@ -299,6 +343,12 @@ export class TcpSocket {
   private rtoValue: number;
   /** Consecutive duplicate ACKs seen at SND.UNA (fast retransmit, RFC 5681). */
   private duplicateAcks = 0;
+  /** Congestion window in bytes (cwnd); starts at one MSS, grows and halves. */
+  private cwndValue: number = DEFAULT_MSS;
+  /** Slow-start threshold in bytes (ssthresh), floored at two MSS. */
+  private ssthreshValue: number = DEFAULT_SEND_WINDOW;
+  /** True while Reno fast recovery is in progress. */
+  private fastRecoveryValue = false;
   /**
    * Segments sent and not acknowledged yet, oldest first: the copies the RTO
    * resends. Data, SYN and FIN all spend sequence space, so all three are
@@ -322,6 +372,7 @@ export class TcpSocket {
   constructor(options: TcpSocketOptions) {
     this.host = options.host;
     this.sim = options.sim;
+    this.bus = options.bus;
     this.initialSequence =
       options.initialSequence === undefined
         ? undefined
@@ -377,6 +428,7 @@ export class TcpSocket {
     this.rtoBaseUs = rtoUs;
     this.maxRtoUs = maxRtoUs;
     this.rtoValue = rtoUs;
+    this.resetCongestion();
   }
 
   /** Current state of the connection. */
@@ -426,7 +478,7 @@ export class TcpSocket {
 
   /**
    * Window the peer last advertised (SND.WND), or undefined before its SYN.
-   * The bytes actually allowed in flight are `min(sendWindow, sndWnd)`.
+   * The bytes actually allowed in flight are `min(cwnd, sendWindow, sndWnd)`.
    */
   get sndWnd(): number | undefined {
     return this.sndWndValue;
@@ -447,6 +499,33 @@ export class TcpSocket {
    */
   get rtoUs(): number {
     return this.rtoValue;
+  }
+
+  /**
+   * Congestion window (cwnd) in bytes, RFC 5681.
+   *
+   * One MSS when the connection opens, doubling per round trip while in slow
+   * start, growing by about one MSS per round trip in congestion avoidance and
+   * collapsing on a loss. The bytes actually allowed in flight are
+   * `min(cwnd, SND.WND, sendWindow)`. It is the number the UI plots; the same
+   * value goes out on the trace bus with every change.
+   */
+  get cwnd(): number {
+    return this.cwndValue;
+  }
+
+  /**
+   * Slow-start threshold (ssthresh) in bytes: where growth switches from
+   * doubling to additive. Starts at the configured top, halves on a loss and
+   * never drops below two MSS.
+   */
+  get ssthresh(): number {
+    return this.ssthreshValue;
+  }
+
+  /** True while Reno fast recovery is repairing a single hole. */
+  get fastRecovery(): boolean {
+    return this.fastRecoveryValue;
   }
 
   /**
@@ -493,6 +572,7 @@ export class TcpSocket {
     this.issValue = this.pickInitialSequence();
     this.sndUnaValue = nextSequence(this.issValue);
     this.sndNxtValue = nextSequence(this.issValue);
+    this.traceCongestion("open");
     this.transition("SYN_SENT");
     this.transmit({ syn: true }, this.issValue, 0);
   }
@@ -534,11 +614,11 @@ export class TcpSocket {
    * Queue `data` for transmission, segmenting it by MSS.
    *
    * The bytes are copied. Segments leave while `SND.NXT - SND.UNA` stays under
-   * `min(sendWindow, SND.WND)`, i.e. while both the fixed send window and the
-   * window the peer advertised have room; the rest stays buffered until valid
-   * ACKs advance SND.UNA or the peer reopens its window. Without
-   * retransmission (hito 5.4) a lost segment stalls the window forever, so this
-   * only completes on a lossless path.
+   * `min(cwnd, sendWindow, SND.WND)`, i.e. while the congestion window, the
+   * configured top and the window the peer advertised all have room; the rest
+   * stays buffered until valid ACKs advance SND.UNA, grow cwnd or the peer
+   * reopens its window. A lost segment is repaired by the RTO or the fast
+   * retransmit of hito 5.4, so the transfer completes under loss too.
    */
   send(data: Uint8Array): void {
     if (this.stateValue !== "ESTABLISHED" && this.stateValue !== "CLOSE_WAIT") {
@@ -664,6 +744,8 @@ export class TcpSocket {
     this.issValue = this.pickInitialSequence();
     this.sndUnaValue = nextSequence(this.issValue);
     this.sndNxtValue = nextSequence(this.issValue);
+    this.resetCongestion();
+    this.traceCongestion("open");
     this.transition("SYN_RECEIVED");
     this.transmit({ syn: true, ack: true }, this.issValue, this.rcvNxtValue);
   }
@@ -852,21 +934,26 @@ export class TcpSocket {
       ) {
         this.duplicateAcks += 1;
         if (this.duplicateAcks === 3) {
-          this.fastRetransmit();
+          this.enterFastRecovery();
+        } else if (this.duplicateAcks > 3 && this.fastRecoveryValue) {
+          // Every further duplicate ACK means one more segment left the
+          // network and is waiting in the peer's buffer, so the window is
+          // inflated by one MSS and new data may follow (Reno).
+          this.cwndValue += this.mss;
+          this.traceCongestion("fast_recovery_inflate");
         }
       }
       this.flushSend();
       return;
     }
     this.sndUnaValue = segment.ack;
-    this.onAckAdvanced();
+    this.onAckAdvanced(acked);
     this.flushSend();
     this.maybeSendFin();
   }
 
   /**
-   * Send payload while both the fixed send window and the peer's advertised
-   * window have room.
+   * Send payload while the effective send window has room.
    *
    * A queued chunk is truncated to the space left, so a window that is not a
    * multiple of the MSS still makes progress instead of deadlocking. A chunk
@@ -911,12 +998,16 @@ export class TcpSocket {
   }
 
   /**
-   * Bytes allowed in flight: the peer's window, capped by the fixed send
-   * window that stands in for `cwnd` until hito 5.5.
+   * Bytes allowed in flight: `min(cwnd, SND.WND, sendWindow)`.
+   *
+   * `cwnd` is the congestion limit and the one that reacts to loss, SND.WND is
+   * the peer's flow-control window and `sendWindow` the operator's fixed top.
+   * Additive increase keeps cwnd as a fraction, so the byte boundary is
+   * floored here: a window is a whole number of bytes.
    */
   private effectiveSendWindow(): number {
     const sndWnd = this.sndWndValue ?? 0;
-    return Math.min(sndWnd, this.sendWindow);
+    return Math.min(Math.floor(this.cwndValue), sndWnd, this.sendWindow);
   }
 
   /** Arm the fixed-interval zero-window persist timer (idempotent). */
@@ -1038,8 +1129,11 @@ export class TcpSocket {
    * RTO expiry: resend the oldest unacknowledged segment and back off.
    *
    * Karn's rule keeps the clock honest: a resent segment carries no RTT
-   * sample, and there is no estimator yet (5.5), so the timeout only doubles —
-   * up to `maxRtoUs` — until an ACK advances SND.UNA.
+   * sample, so the timeout only doubles — up to `maxRtoUs` — until an ACK
+   * advances SND.UNA. The window reaction is Tahoe's: a timeout means the
+   * duplicates never reported the loss, so `ssthresh` halves (floored at two
+   * MSS), `cwnd` drops to one MSS and slow start starts over. A timeout also
+   * ends fast recovery, if one was in progress.
    */
   private onRto(): void {
     if (this.outstanding.length === 0 || !this.canRetransmit()) {
@@ -1048,25 +1142,39 @@ export class TcpSocket {
     // The resend restarts the duplicate-ACK count: those ACKs were about the
     // lost attempt, and it is the timer that answered them now.
     this.duplicateAcks = 0;
+    this.fastRecoveryValue = false;
+    this.ssthreshValue = Math.max(2 * this.mss, Math.floor(this.cwndValue / 2));
+    this.cwndValue = this.mss;
+    this.traceCongestion("timeout");
     this.retransmitOldest();
     this.rtoValue = Math.min(this.rtoValue * 2, this.maxRtoUs);
     this.armRto();
   }
 
   /**
-   * Fast retransmit (RFC 5681): three duplicate ACKs at SND.UNA say the head
-   * segment is missing while later ones got through, so it goes out again at
-   * once instead of waiting for the timer.
+   * Fast recovery, classic Reno (RFC 5681 §3.2): the third duplicate ACK at
+   * SND.UNA both fast retransmits the head segment and opens the recovery
+   * window.
    *
-   * No fast recovery (hito 5.5): `sendWindow` and the RTO stay untouched, so
-   * this only saves one timeout — it does not react to congestion.
+   * `ssthresh` drops to half the current window (floored at two MSS) and
+   * `cwnd` is inflated to `ssthresh + 3*MSS`: three segments already left the
+   * network and wait in the peer's buffer, so the sender may replace them.
+   * Every further duplicate ACK inflates one more MSS, and the first ACK that
+   * covers new data deflates the window back to `ssthresh` and returns to
+   * congestion avoidance — no await for a timeout, no Tahoe collapse. Without
+   * SACK there is no way to tell a partial ACK from a full one, so classic
+   * Reno is what closes the recovery here.
    */
-  private fastRetransmit(): void {
+  private enterFastRecovery(): void {
     const oldest = this.outstanding[0];
     if (oldest === undefined || oldest.payload.length === 0) {
       return;
     }
+    this.ssthreshValue = Math.max(2 * this.mss, Math.floor(this.cwndValue / 2));
+    this.cwndValue = this.ssthreshValue + 3 * this.mss;
+    this.fastRecoveryValue = true;
     this.retransmitOldest();
+    this.traceCongestion("fast_recovery");
   }
 
   /** Resend the oldest outstanding segment: same SEQ, same ACK, same bytes. */
@@ -1123,10 +1231,52 @@ export class TcpSocket {
   }
 
   /** An ACK advanced SND.UNA: the path is alive again, restart the clock. */
-  private onAckAdvanced(): void {
+  private onAckAdvanced(acked: number): void {
     this.resetRetransmission();
     this.purgeAcknowledged();
+    this.onCongestionAck(acked);
     this.armRto();
+  }
+
+  /**
+   * Move `cwnd` on an ACK that advances SND.UNA (RFC 5681 §3.1).
+   *
+   * Slow start adds one MSS per acknowledged segment while cwnd is under
+   * ssthresh, so the window doubles every round trip; congestion avoidance
+   * adds `MSS*MSS/cwnd` instead, about one MSS per round trip. The ACK that
+   * ends Reno fast recovery only deflates the window to `ssthresh`: the loss
+   * was already paid for when the recovery opened.
+   */
+  private onCongestionAck(acked: number): void {
+    if (this.fastRecoveryValue) {
+      this.fastRecoveryValue = false;
+      this.cwndValue = this.ssthreshValue;
+      this.traceCongestion("fast_recovery_exit");
+      return;
+    }
+    const cwnd = this.cwndValue;
+    if (cwnd < this.ssthreshValue) {
+      // Byte counting: a cumulative ACK never grows the window by more than
+      // one segment, and a short one grows it by exactly what it covered.
+      this.cwndValue = cwnd + Math.min(acked, this.mss);
+      this.traceCongestion("slow_start");
+      return;
+    }
+    this.cwndValue = cwnd + (this.mss * this.mss) / cwnd;
+    this.traceCongestion("congestion_avoidance");
+  }
+
+  /**
+   * Reset the congestion state for a fresh connection: one MSS of window and
+   * a threshold at the configured top, the only ceiling a lossless path meets.
+   *
+   * It also runs from `clearTcb()`, so a socket reused after a close starts
+   * from a clean window instead of the one the previous connection left.
+   */
+  private resetCongestion(): void {
+    this.cwndValue = this.mss;
+    this.ssthreshValue = this.sendWindow;
+    this.fastRecoveryValue = false;
   }
 
   /** The handshake acknowledged everything we sent (our SYN or SYN+ACK). */
@@ -1401,12 +1551,47 @@ export class TcpSocket {
     this.finQueued = false;
     this.reordered.clear();
     this.receivedChunks.length = 0;
+    this.resetCongestion();
   }
 
   private cancelTimeWait(): void {
     const timer = this.timeWaitTimer;
     this.timeWaitTimer = undefined;
     timer?.cancel();
+  }
+
+  /** Scope of this socket's congestion records: host id plus local port. */
+  private traceScope(): string {
+    const port = this.localPortValue;
+    return port === undefined
+      ? `${this.host.id}:tcp`
+      : `${this.host.id}:tcp/${port}`;
+  }
+
+  /**
+   * Publish one congestion-window sample on the trace bus.
+   *
+   * The record follows the `state()` mold the router already uses: `key=value`
+   * tokens whose first word names the phase transition (`open`,
+   * `slow_start`, `congestion_avoidance`, `fast_recovery`,
+   * `fast_recovery_inflate`, `fast_recovery_exit`, `timeout`). `cwnd` and
+   * `ssthresh` are the rounded byte counts the getters expose, so the UI/CLI
+   * can plot the sawtooth straight from the trace stream.
+   */
+  private traceCongestion(event: string): void {
+    const bus = this.bus;
+    if (bus === undefined) {
+      return;
+    }
+    bus.emit({
+      t: this.sim.now,
+      kind: "state",
+      scope: this.traceScope(),
+      detail:
+        `${event} cwnd=${Math.round(this.cwndValue)} ` +
+        `ssthresh=${Math.round(this.ssthreshValue)} ` +
+        `sndUna=${this.sndUnaValue ?? 0}`,
+    });
   }
 
   private transition(state: TcpState): void {

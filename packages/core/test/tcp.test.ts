@@ -653,13 +653,15 @@ describe("tcp buffers and cumulative ACKs (F-56)", () => {
     expect(DEFAULT_SEND_WINDOW).toBe(4 * DEFAULT_MSS);
     client.send(payload);
 
-    // Only the fixed window is in flight; the rest waits in the send buffer.
+    // Only the congestion window is in flight right after the handshake (one
+    // MSS, hito 5.5); the rest waits in the send buffer.
+    expect(client.cwnd).toBe(DEFAULT_MSS);
     expect(client.sndUna).toBe(start);
-    expect(client.sndNxt).toBe(start + DEFAULT_SEND_WINDOW);
+    expect(client.sndNxt).toBe(start + DEFAULT_MSS);
     const firstBurst = tcpSegments(bus.drain(), "a").filter(
       (seg) => seg.payload.length > 0,
     );
-    expect(firstBurst).toHaveLength(DEFAULT_SEND_WINDOW / DEFAULT_MSS);
+    expect(firstBurst).toHaveLength(1);
 
     // An ACK beyond SND.NXT is invalid and must leave the window untouched.
     inject(server, client, {
@@ -669,7 +671,7 @@ describe("tcp buffers and cumulative ACKs (F-56)", () => {
     sim.runUntil(sim.now + LATENCY_US + 1);
     expect(client.sndUna).toBe(start);
 
-    // Real ACKs open the window: the remaining two segments are sent.
+    // Real ACKs open the window and the rest of the payload follows.
     sim.runAll();
     expect(server.read()).toEqual(payload);
     expect(client.sndUna).toBe(start + payload.length);
@@ -755,17 +757,26 @@ describe("tcp sliding window and flow control (F-57)", () => {
 
     client.send(patterned(6 * DEFAULT_MSS));
 
-    // Only the advertised window is in flight: 2 MSS, not the 4 of a
-    // fixed 4*MSS send window.
-    expect(client.sndNxt).toBe(start + capacity);
+    // The congestion window opens at one MSS, so the first burst is smaller
+    // than the peer's window: two MSS can fit in the buffer, four could not.
+    expect(client.cwnd).toBe(DEFAULT_MSS);
+    expect(client.sndNxt).toBe(start + DEFAULT_MSS);
+    const firstBurst = tcpSegments(bus.drain(), "a").filter(
+      (seg) => seg.payload.length > 0,
+    );
+    expect(firstBurst).toHaveLength(1);
+
+    // Slow start widens cwnd, but the peer's window is what caps the flight:
+    // the first ACK advertises one MSS of free buffer, so exactly one more
+    // segment leaves and fills it.
+    sim.runUntil(sim.now + 8 * LATENCY_US);
+    expect(client.cwnd).toBeGreaterThanOrEqual(capacity);
     const burst = tcpSegments(bus.drain(), "a").filter(
       (seg) => seg.payload.length > 0,
     );
-    expect(burst).toHaveLength(2);
-    expect(burst.every((seg) => seg.payload.length === DEFAULT_MSS)).toBe(true);
-
-    // Filling the peer's buffer closes its window and freezes SND.NXT there.
-    sim.runUntil(sim.now + 8 * LATENCY_US);
+    expect(burst).toHaveLength(1);
+    expect(burst[0]?.payload.length).toBe(DEFAULT_MSS);
+    // Filling the peer's buffer closes it and freezes SND.NXT there.
     expect(server.rcvWnd).toBe(0);
     expect(client.sndWnd).toBe(0);
     expect(client.sndUna).toBe(start + capacity);
@@ -893,9 +904,11 @@ describe("tcp sliding window and flow control (F-57)", () => {
     const payload = patterned(6 * DEFAULT_MSS);
 
     client.send(payload);
-    expect(client.sndNxt).toBe(start + capacity);
+    // The congestion window opens at one MSS (hito 5.5), so that is the first
+    // burst; the receiver's buffer becomes the constraint once it widens.
+    expect(client.sndNxt).toBe(start + DEFAULT_MSS);
 
-    // Without a reader the sender stalls after one buffer's worth of data.
+    // Without a reader the sender stalls once it has filled the buffer.
     sim.runUntil(sim.now + 10 * LATENCY_US);
     expect(client.sndNxt).toBe(start + capacity);
     expect(server.rcvWnd).toBe(0);
@@ -963,15 +976,19 @@ function wireRig(
     );
   };
   plug(params.lossRate ?? 0);
+  // Both sockets trace their congestion state on the same bus as the wire, so
+  // a test can read the cwnd sawtooth the UI would plot.
   const server = new TcpSocket({
     host: b,
     sim,
+    bus,
     initialSequence: SERVER_ISN,
     ...tcp,
   });
   const client = new TcpSocket({
     host: a,
     sim,
+    bus,
     initialSequence: CLIENT_ISN,
     ...tcp,
   });
@@ -989,63 +1006,78 @@ describe("tcp retransmission: RTO and fast retransmit (F-58)", () => {
   const START = CLIENT_ISN + 1;
 
   /**
-   * Deterministic search for the scenario the RTO test needs: of the four
-   * segments in the first burst exactly the *second* (an intermediate one) is
-   * lost, and nothing else is. The link's `lossRate` decides every drop from
-   * the seeded PRNG, so the search always lands on the same seed.
+   * Deterministic search for the scenario the RTO test needs: exactly one data
+   * frame is lost, it is not the first one (so it leaves a hole with segments
+   * behind it) and it is repaired one full timeout later, i.e. fewer than
+   * three duplicate ACKs reached the sender so no fast retransmit fired. The
+   * link's `lossRate` decides every drop from the seeded PRNG, so the search
+   * always lands on the same seed.
    */
-  function seedWithOneLostMiddleSegment(): number {
+  function seedWithOneLostIntermediateSegment(): number {
     for (let seed = 1; seed <= 1000; seed += 1) {
       const { sim, bus, client } = wireRig(seed, { lossRate: 0.1 });
       if (client.state !== "ESTABLISHED") {
         continue;
       }
-      client.send(patterned(4 * DEFAULT_MSS));
+      client.send(patterned(6 * DEFAULT_MSS));
       sim.runAll();
-      const lost = droppedTcp(bus.drain());
+      const traces = bus.drain();
+      const lost = droppedTcp(traces).filter(
+        (frame) => frame.seg.payload.length > 0,
+      );
       if (lost.length !== 1) {
         continue;
       }
-      const only = lost[0];
-      if (only?.seg.payload.length !== DEFAULT_MSS) {
+      const seq = lost[0]?.seg.seq ?? START;
+      if (seq === START) {
         continue;
       }
-      if (only.seg.seq !== START + DEFAULT_MSS) {
+      const attempts = attemptFrames(traces, seq);
+      const firstAt = attempts[0]?.t ?? 0;
+      if (attempts.length !== 2) {
+        continue;
+      }
+      if ((attempts[1]?.t ?? 0) < firstAt + DEFAULT_RTO_US) {
         continue;
       }
       return seed;
     }
-    throw new Error("no seed dropped exactly one intermediate segment");
+    throw new Error("no seed dropped one intermediate segment on the RTO");
   }
 
   test("recovers a lost intermediate segment through the RTO", () => {
-    const seed = seedWithOneLostMiddleSegment();
+    const seed = seedWithOneLostIntermediateSegment();
     const { sim, bus, client, server } = wireRig(seed, { lossRate: 0.1 });
-    const payload = patterned(4 * DEFAULT_MSS);
+    const payload = patterned(6 * DEFAULT_MSS);
     const delivered: Array<Uint8Array> = [];
     server.onData = (data) => delivered.push(data);
 
     client.send(payload);
     const sentAt = sim.now;
     expect(client.sndUna).toBe(START);
-    expect(client.sndNxt).toBe(START + payload.length);
+    // One MSS opens the flight (hito 5.5): the rest follows the ACKs.
+    expect(client.sndNxt).toBe(START + DEFAULT_MSS);
     sim.runAll();
 
     const traces = bus.drain();
-    const lost = droppedTcp(traces);
+    const lost = droppedTcp(traces).filter(
+      (frame) => frame.seg.payload.length > 0,
+    );
     expect(lost).toHaveLength(1);
     const dropped = lost[0];
-    expect(dropped?.seg.seq).toBe(START + DEFAULT_MSS);
+    const droppedSeq = dropped?.seg.seq ?? START;
+    expect(droppedSeq).toBeGreaterThan(START);
 
-    // Only two duplicate ACKs can reach the sender behind a single hole, so
-    // the recovery is the RTO: the lost bytes go out again one timeout later
-    // (base value, no backoff yet) and never before it.
-    const attempts = attemptFrames(traces, START + DEFAULT_MSS);
+    // Fewer than three duplicate ACKs can reach the sender behind that hole,
+    // so the recovery is the RTO: the lost bytes go out again one timeout
+    // later (base value, no backoff yet) and never before it.
+    const attempts = attemptFrames(traces, droppedSeq);
     expect(attempts).toHaveLength(2);
     expect(attempts[0]?.delivered).toBe(false);
-    expect(attempts[0]?.t).toBe(sentAt);
     expect(attempts[1]?.delivered).toBe(true);
-    expect(attempts[1]?.t).toBeGreaterThanOrEqual(sentAt + DEFAULT_RTO_US);
+    expect(attempts[1]?.t).toBeGreaterThanOrEqual(
+      (attempts[0]?.t ?? 0) + DEFAULT_RTO_US,
+    );
     expect(attempts[1]?.t).toBeLessThanOrEqual(sentAt + 2 * DEFAULT_RTO_US);
     expect(Array.from(attempts[1]?.seg.payload ?? [])).toEqual(
       Array.from(dropped?.seg.payload ?? []),
@@ -1077,7 +1109,9 @@ describe("tcp retransmission: RTO and fast retransmit (F-58)", () => {
     const firstBytes = Array.from(original[0]?.seg.payload ?? []);
     expect(firstBytes).toEqual(Array.from(payload.subarray(0, DEFAULT_MSS)));
     expect(client.sndUna).toBe(START);
-    expect(client.sndNxt).toBe(START + 2 * DEFAULT_MSS);
+    // One MSS leaves: that is the whole congestion window right now, and the
+    // second segment waits in the send buffer.
+    expect(client.sndNxt).toBe(START + DEFAULT_MSS);
 
     // Restore the wire so the hand-built duplicate ACKs reach the client.
     useLossRate(0);
@@ -1106,11 +1140,17 @@ describe("tcp retransmission: RTO and fast retransmit (F-58)", () => {
     expect(resent[0]?.t).toBeLessThan(sentAt + DEFAULT_RTO_US);
     // Identical bytes: same sequence number, same payload copy.
     expect(Array.from(resent[0]?.seg.payload ?? [])).toEqual(firstBytes);
-    // Just the resend: no fast recovery, no window change, no backoff (5.5).
+    // Reno fast recovery, not Tahoe: the window halves into the inflated one
+    // and the RTO is left at its base value (no timeout was needed).
+    expect(client.fastRecovery).toBe(true);
+    expect(client.ssthresh).toBe(2 * DEFAULT_MSS);
+    expect(client.cwnd).toBe(client.ssthresh + 3 * DEFAULT_MSS);
     expect(client.rtoUs).toBe(DEFAULT_RTO_US);
 
-    // The peer fills the hole and the stalled segment follows on the RTO.
+    // The peer fills the hole: the ACK of the resend ends recovery and the
+    // queued second segment follows.
     sim.runAll();
+    expect(client.fastRecovery).toBe(false);
     expect(client.sndUna).toBe(START + 2 * DEFAULT_MSS);
     expect(server.rcvNxt).toBe(START + 2 * DEFAULT_MSS);
     expect(server.read()).toEqual(patterned(2 * DEFAULT_MSS));
@@ -1285,5 +1325,426 @@ describe("tcp retransmission of control segments (F-58)", () => {
     expect(acks[0]?.seg.payload).toHaveLength(0);
     expect(client.state).toBe("ESTABLISHED");
     expect(client.rcvNxt).toBe(SERVER_ISN + 1);
+  });
+});
+
+/**
+ * Congestion state of one socket, sampled the instant it pushes a `state()`
+ * record to the bus. This is the same stream the UI/CLI reads to plot the
+ * cwnd sawtooth, so the tests pin both the numbers and the event names.
+ */
+interface CongestionEvent {
+  t: number;
+  event: string;
+  cwnd: number;
+  ssthresh: number;
+  detail: string;
+}
+
+function recordCongestion(
+  bus: TraceBus,
+  socket: TcpSocket,
+): Array<CongestionEvent> {
+  const prefix = `${socket.host.id}:tcp`;
+  const events: Array<CongestionEvent> = [];
+  bus.subscribe((trace) => {
+    if (trace.kind !== "state" || !trace.scope.startsWith(prefix)) {
+      return;
+    }
+    const [event = ""] = trace.detail.split(" ");
+    events.push({
+      t: trace.t,
+      event,
+      cwnd: socket.cwnd,
+      ssthresh: socket.ssthresh,
+      detail: trace.detail,
+    });
+  });
+  return events;
+}
+
+describe("tcp congestion control: Reno (F-59)", () => {
+  const RTT_US = 2 * LATENCY_US;
+  const MSS = DEFAULT_MSS;
+
+  test("slow start doubles cwnd per round trip up to the configured top", () => {
+    // The configuration top is well above what the payload needs, so slow
+    // start is the only thing shaping the window for four round trips.
+    const ceiling = 32 * MSS;
+    const { sim, bus, client, server } = wireRig(
+      23,
+      {},
+      { sendWindow: ceiling },
+      false,
+    );
+    const events = recordCongestion(bus, client);
+    const start = CLIENT_ISN + 1;
+    const payload = patterned(16 * MSS);
+    const chunks: Array<Uint8Array> = [];
+
+    // A fresh connection opens at one MSS; the threshold starts at the top.
+    client.connect(IP_B, SERVER_PORT);
+    sim.runAll();
+    expect(client.state).toBe("ESTABLISHED");
+    expect(events.map((event) => event.event)).toEqual(["open"]);
+    expect(client.cwnd).toBe(MSS);
+    expect(client.ssthresh).toBe(ceiling);
+
+    client.send(payload);
+    const t0 = sim.now;
+    // One MSS of flight, not the 4 MSS of hito 5.3: cwnd is the binding cap.
+    expect(client.sndUna).toBe(start);
+    expect(client.sndNxt).toBe(start + MSS);
+
+    const rounds: Array<number> = [];
+    for (let round = 1; round <= 4; round += 1) {
+      sim.runUntil(t0 + round * RTT_US);
+      rounds.push(client.cwnd);
+      // Every round trip doubles the window, and the flight fits inside it.
+      expect((client.sndNxt ?? 0) - (client.sndUna ?? 0)).toBeLessThanOrEqual(
+        Math.floor(client.cwnd),
+      );
+      // Draining keeps the receiver window out of the way: the peer is not
+      // the constraint here.
+      chunks.push(server.read());
+    }
+    expect(rounds).toEqual([2, 4, 8, 16].map((count) => count * MSS));
+    // Slow start the whole way: the threshold never moved.
+    expect(client.ssthresh).toBe(ceiling);
+    expect(events.slice(1).every((event) => event.event === "slow_start")).toBe(
+      true,
+    );
+    expect(events[0]?.event).toBe("open");
+    expect(events[0]?.cwnd).toBe(MSS);
+    // The trace carries the graph-ready numbers the getters expose.
+    for (const event of events) {
+      expect(event.detail).toContain(`cwnd=${Math.round(event.cwnd)}`);
+      expect(event.detail).toContain(`ssthresh=${Math.round(event.ssthresh)}`);
+    }
+
+    sim.runAll();
+    chunks.push(server.read());
+    expect(joined(chunks)).toEqual(payload);
+    expect(client.sndUna).toBe(start + payload.length);
+    expect(client.sndNxt).toBe(start + payload.length);
+  });
+
+  test("switches to additive increase once cwnd reaches ssthresh", () => {
+    // The default send window (4 MSS) is also the configured top, so slow
+    // start stops there and the growth flattens out.
+    const { sim, bus, client, server } = wireRig(29);
+    const events = recordCongestion(bus, client);
+    const ceiling = DEFAULT_SEND_WINDOW;
+    const payload = patterned(40 * MSS);
+
+    client.send(payload);
+    const t0 = sim.now;
+    expect(client.ssthresh).toBe(ceiling);
+
+    const slowStart: Array<number> = [];
+    for (let round = 1; round <= 2; round += 1) {
+      sim.runUntil(t0 + round * RTT_US);
+      slowStart.push(client.cwnd);
+      server.read();
+    }
+    expect(slowStart).toEqual([2 * MSS, ceiling]);
+
+    // From ssthresh on, one round trip buys about one MSS (AIMD's additive
+    // part), never the doubling slow start would produce.
+    const steps: Array<number> = [];
+    let previous = client.cwnd;
+    for (let round = 3; round <= 7; round += 1) {
+      sim.runUntil(t0 + round * RTT_US);
+      steps.push(client.cwnd - previous);
+      previous = client.cwnd;
+      server.read();
+    }
+    expect(steps).toHaveLength(5);
+    expect(
+      steps.every((step) => step > 0 && step <= 1.5 * MSS),
+      `steps ${steps.join(",")}`,
+    ).toBe(true);
+
+    const phases = new Set(events.map((event) => event.event));
+    expect(phases.has("slow_start")).toBe(true);
+    expect(phases.has("congestion_avoidance")).toBe(true);
+  });
+
+  test("halves ssthresh and restarts slow start from one MSS on an RTO", () => {
+    const ceiling = 32 * MSS;
+    const { sim, bus, client, server, useLossRate } = wireRig(
+      13,
+      {},
+      { sendWindow: ceiling },
+    );
+    const events = recordCongestion(bus, client);
+    const payload = patterned(32 * MSS);
+    const rto = DEFAULT_RTO_US;
+
+    client.send(payload);
+    const t0 = sim.now;
+    sim.runUntil(t0 + 2 * RTT_US);
+    expect(client.cwnd).toBe(4 * MSS);
+
+    // Kill the wire: the burst the client hands to the link keeps its fate,
+    // but the ACKs it provokes die on the dead link, so cwnd freezes here and
+    // nothing the sender emits afterwards is ever acknowledged.
+    useLossRate(1);
+    sim.runUntil(t0 + 10 * RTT_US);
+    const beforeTimeout = client.cwnd;
+    expect(beforeTimeout).toBe(4 * MSS);
+    expect(client.ssthresh).toBe(ceiling);
+    expect(events.some((event) => event.event === "timeout")).toBe(false);
+
+    // The first timeout halves the threshold and drops to one MSS: back to
+    // slow start, and the timer backs off.
+    sim.runUntil(t0 + 10 * RTT_US + rto);
+    const timeoutIndex = events.findIndex((event) => event.event === "timeout");
+    expect(timeoutIndex).toBeGreaterThan(0);
+    expect(events[timeoutIndex]?.cwnd).toBe(MSS);
+    expect(client.cwnd).toBe(MSS);
+    expect(client.ssthresh).toBe(
+      Math.max(2 * MSS, Math.floor(beforeTimeout / 2)),
+    );
+    expect(client.rtoUs).toBe(2 * rto);
+
+    // A live wire again: the retransmission at the next timeout restarts the
+    // transfer, slow start climbs from one MSS and every byte arrives.
+    useLossRate(0);
+    sim.runAll();
+    expect(
+      events
+        .slice(timeoutIndex + 1)
+        .some(
+          (event) => event.event === "slow_start" && event.cwnd === 2 * MSS,
+        ),
+    ).toBe(true);
+    expect(server.read()).toEqual(payload);
+    expect(client.sndUna).toBe(CLIENT_ISN + 1 + payload.length);
+  });
+
+  test("enters fast recovery on the third dup ACK and deflates on new data", () => {
+    const ceiling = 32 * MSS;
+    const { sim, bus, client, server, useLossRate } = wireRig(
+      7,
+      {},
+      { sendWindow: ceiling },
+    );
+    const events = recordCongestion(bus, client);
+    const start = CLIENT_ISN + 1;
+
+    // Warm up on a good wire: three round trips of slow start leave cwnd at
+    // 8 MSS with eight segments in flight and one still queued.
+    client.send(patterned(16 * MSS));
+    const t0 = sim.now;
+    sim.runUntil(t0 + 3 * RTT_US);
+    expect(client.cwnd).toBe(8 * MSS);
+    expect(client.ssthresh).toBe(ceiling);
+    expect(client.sndUna).toBe(start + 7 * MSS);
+    expect(client.sndNxt).toBe(start + 15 * MSS);
+
+    // Dead wire from here on: the frames already handed to the link keep their
+    // fate but their ACKs die, so cwnd only moves on the ACKs this test hands
+    // in, exactly like T4's fast retransmit rig.
+    useLossRate(1);
+    sim.runUntil(t0 + 5 * RTT_US);
+    expect(client.cwnd).toBe(8 * MSS);
+    expect(client.fastRecovery).toBe(false);
+
+    const dupAck = (): void => {
+      inject(server, client, { seq: server.sndNxt ?? 0, ack: start + 7 * MSS });
+      sim.runUntil(sim.now + LATENCY_US);
+    };
+
+    // Bring the wire back so the hand-built duplicate ACKs reach the client.
+    useLossRate(0);
+
+    // Two duplicates are noise: the window does not move.
+    dupAck();
+    dupAck();
+    expect(client.cwnd).toBe(8 * MSS);
+    expect(client.fastRecovery).toBe(false);
+
+    // The third one is a loss signal: ssthresh = cwnd/2, the window is
+    // inflated by three MSS and the head segment is resent.
+    const halved = Math.floor((8 * MSS) / 2);
+    dupAck();
+    expect(client.fastRecovery).toBe(true);
+    expect(client.ssthresh).toBe(Math.max(2 * MSS, halved));
+    expect(client.cwnd).toBe(client.ssthresh + 3 * MSS);
+    // Reno, not Tahoe: no timeout, no backoff, the clock is still at its base.
+    expect(client.rtoUs).toBe(DEFAULT_RTO_US);
+    expect(events.some((event) => event.event === "timeout")).toBe(false);
+
+    // The resend is already on the live wire, but its ACK must not race the
+    // hand-injected duplicates: it dies on a dead wire for exactly that trip.
+    useLossRate(1);
+    sim.runUntil(sim.now + 2 * LATENCY_US);
+    useLossRate(0);
+
+    // Every further duplicate ACK inflates the window by one more MSS.
+    dupAck();
+    expect(client.cwnd).toBe(client.ssthresh + 4 * MSS);
+    dupAck();
+    expect(client.cwnd).toBe(client.ssthresh + 5 * MSS);
+
+    // The ACK that covers new data ends recovery: deflate to ssthresh and go
+    // back to congestion avoidance.
+    inject(server, client, { seq: server.sndNxt ?? 0, ack: start + 8 * MSS });
+    sim.runUntil(sim.now + LATENCY_US);
+    expect(client.fastRecovery).toBe(false);
+    expect(client.cwnd).toBe(client.ssthresh);
+    expect(client.rtoUs).toBe(DEFAULT_RTO_US);
+
+    const names = events.map((event) => event.event);
+    expect(names).toContain("fast_recovery");
+    expect(names).toContain("fast_recovery_inflate");
+    expect(names).toContain("fast_recovery_exit");
+    expect(names).not.toContain("timeout");
+  });
+
+  test("draws a sawtooth under loss and still delivers every byte", () => {
+    const ceiling = 64 * MSS;
+    const { sim, bus, client, server } = wireRig(
+      5,
+      { lossRate: 0.1 },
+      { sendWindow: ceiling },
+    );
+    const events = recordCongestion(bus, client);
+    const payload = patterned(40 * MSS, 5);
+
+    client.send(payload);
+    sim.runAll();
+
+    // The payload survives the losses, byte for byte and in order.
+    expect(server.read()).toEqual(payload);
+    expect(client.sndUna).toBe(CLIENT_ISN + 1 + payload.length);
+    expect(client.sndNxt).toBe(CLIENT_ISN + 1 + payload.length);
+
+    // The window rises, collapses, and rises again: the sawtooth the UI plots.
+    const falls: Array<number> = [];
+    for (let index = 1; index < events.length; index += 1) {
+      const before = events[index - 1] as CongestionEvent;
+      const after = events[index] as CongestionEvent;
+      if (after.cwnd < before.cwnd) {
+        falls.push(index);
+      }
+    }
+    expect(falls.length).toBeGreaterThanOrEqual(2);
+    for (const index of falls) {
+      const before = events[index - 1] as CongestionEvent;
+      const after = events[index] as CongestionEvent;
+      if (after.event === "timeout") {
+        expect(after.cwnd).toBe(MSS);
+        expect(after.ssthresh).toBe(
+          Math.max(2 * MSS, Math.floor(before.cwnd / 2)),
+        );
+        continue;
+      }
+      if (after.event === "fast_recovery") {
+        expect(after.ssthresh).toBe(
+          Math.max(2 * MSS, Math.floor(before.cwnd / 2)),
+        );
+        expect(after.cwnd).toBe(after.ssthresh + 3 * MSS);
+        continue;
+      }
+      // Any other fall is the deflate that ends fast recovery.
+      expect(after.event).toBe("fast_recovery_exit");
+      expect(after.cwnd).toBe(after.ssthresh);
+    }
+    // Slow start runs again after a collapse, so the tooth climbs back.
+    const firstFall = falls[0] as number;
+    expect(
+      events.slice(firstFall).some((event) => event.event === "slow_start"),
+    ).toBe(true);
+    // And between two collapses the window really climbs: a sawtooth, not a
+    // window that only ever shrinks.
+    const secondFall = falls[1] as number;
+    const afterFirstCollapse = events[firstFall] as CongestionEvent;
+    expect(
+      events
+        .slice(firstFall, secondFall)
+        .some((event) => event.cwnd > afterFirstCollapse.cwnd),
+    ).toBe(true);
+  });
+
+  test("the window in flight is min(cwnd, SND.WND, sendWindow)", () => {
+    const flight = (socket: TcpSocket): number =>
+      ((socket.sndNxt ?? 0) - (socket.sndUna ?? 0)) >>> 0;
+
+    // cwnd is the binding cap right after the handshake, well under both the
+    // peer's buffer and the configured top.
+    const fresh = wireRig(37, {}, { sendWindow: 32 * MSS });
+    fresh.client.send(patterned(8 * MSS));
+    expect(fresh.client.cwnd).toBe(MSS);
+    expect(fresh.client.sndWnd).toBeGreaterThan(8 * MSS);
+    expect(fresh.client.sendWindow).toBe(32 * MSS);
+    expect(flight(fresh.client)).toBe(MSS);
+
+    // The peer's advertised window wins when it is the smallest: the peer
+    // holds 2 MSS, so nothing beyond them ever leaves while cwnd keeps
+    // climbing.
+    const peerLimited = wireRig(
+      41,
+      {},
+      { sendWindow: 32 * MSS, receiveCapacity: 2 * MSS },
+    );
+    const peerStart = CLIENT_ISN + 1;
+    peerLimited.client.send(patterned(32 * MSS));
+    peerLimited.sim.runUntil(peerLimited.sim.now + 8 * RTT_US);
+    expect(peerLimited.client.cwnd).toBeGreaterThan(2 * MSS);
+    expect((peerLimited.client.sndNxt ?? 0) - peerStart).toBe(2 * MSS);
+
+    // The configured top wins when it is the smallest: cwnd grows past it in
+    // congestion avoidance but the flight never exceeds it.
+    const configLimited = wireRig(43, {}, { sendWindow: 2 * MSS });
+    configLimited.client.send(patterned(32 * MSS));
+    configLimited.sim.runUntil(configLimited.sim.now + 8 * RTT_US);
+    expect(configLimited.client.cwnd).toBeGreaterThan(2 * MSS);
+    expect(flight(configLimited.client)).toBe(2 * MSS);
+  });
+
+  test("clamps every burst to cwnd and transfers the payload intact", () => {
+    const ceiling = 32 * MSS;
+    const { sim, bus, client, server } = wireRig(
+      9,
+      {},
+      { sendWindow: ceiling },
+    );
+    const payload = patterned(16 * MSS, 9);
+    const samples: Array<{ flight: number; window: number }> = [];
+    // Sample every data segment as it goes out: cwnd (and the two ceilings)
+    // must already cover the flight that includes it.
+    bus.subscribe((trace) => {
+      if (trace.kind !== "frame_tx" || trace.from !== "a") {
+        return;
+      }
+      const seg = decodeTcp(trace.frame);
+      if (seg === undefined || seg.payload.length === 0) {
+        return;
+      }
+      samples.push({
+        flight: ((client.sndNxt ?? 0) - (client.sndUna ?? 0)) >>> 0,
+        window: Math.min(
+          Math.floor(client.cwnd),
+          client.sndWnd ?? 0,
+          client.sendWindow,
+        ),
+      });
+    });
+
+    const chunks: Array<Uint8Array> = [];
+    client.send(payload);
+    for (let round = 0; round < 20; round += 1) {
+      sim.runUntil(sim.now + RTT_US);
+      chunks.push(server.read());
+    }
+
+    expect(samples).toHaveLength(16);
+    for (const sample of samples) {
+      expect(sample.flight).toBeLessThanOrEqual(sample.window);
+    }
+    expect(joined(chunks)).toEqual(payload);
+    expect(client.sndUna).toBe(CLIENT_ISN + 1 + payload.length);
   });
 });
