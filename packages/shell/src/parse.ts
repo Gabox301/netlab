@@ -7,7 +7,7 @@
  * input.
  */
 
-import { Ipv4Address } from "@netlab/bytes";
+import { Ipv4Address, MacAddress } from "@netlab/bytes";
 import { splitIpv4Prefix } from "@netlab/core";
 import { type ShellError, shellError } from "./errors";
 
@@ -113,6 +113,24 @@ export interface SsCommand {
   readonly kind: "ss";
 }
 
+/**
+ * `send IFACE DSTMAC ETHERTYPE HEX`: one hand-built Ethernet frame (F-101).
+ *
+ * The frame bypasses routing and ARP by construction: the caller writes the
+ * destination MAC, the ethertype and the payload bytes, which is exactly what
+ * an exercise about malformed or spoofed frames needs.
+ */
+export interface SendCommand {
+  readonly kind: "send";
+  readonly iface: string;
+  /** Normalized lowercase `aa:bb:cc:dd:ee:ff`. */
+  readonly dstMac: string;
+  /** EtherType in 0..0xFFFF. */
+  readonly etherType: number;
+  /** Lowercase hex payload; its length is always even. */
+  readonly payload: string;
+}
+
 /** `http-server [PORT]`: serve a fixed HTTP/1.0 page from the host. */
 export interface HttpServerCommand {
   readonly kind: "http.server";
@@ -149,6 +167,7 @@ export type ShellCommand =
   | NcUdpCommand
   | NcTcpCommand
   | SsCommand
+  | SendCommand
   | HttpServerCommand
   | HttpGetCommand
   | HelpCommand;
@@ -728,6 +747,89 @@ function parseSs(tokens: ReadonlyArray<string>): ShellParseResult {
   return fail("unexpected_argument", "ss", `unexpected argument: ${argument}`);
 }
 
+/** `0x0800` / `2048` / `0x86dd` → an EtherType, or undefined when invalid. */
+function parseEtherTypeValue(text: string): number | undefined {
+  const value = /^0x[0-9a-f]+$/i.test(text)
+    ? Number.parseInt(text.slice(2), 16)
+    : /^[0-9]+$/.test(text)
+      ? Number.parseInt(text, 10)
+      : Number.NaN;
+  return Number.isInteger(value) && value >= 0 && value <= 0xffff
+    ? value
+    : undefined;
+}
+
+function isMac(text: string): boolean {
+  try {
+    MacAddress.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `send IFACE DSTMAC ETHERTYPE HEX`: build one Ethernet frame by hand (F-101).
+ *
+ * Everything is explicit — the destination MAC is never resolved, the
+ * ethertype accepts both `0x0806` and `2054`, and the payload is lowercase
+ * hex like `nc`. Short frames are padded by the serializer to the Ethernet
+ * minimum; that is a wire detail the command result reports, not a parser
+ * concern.
+ */
+function parseSend(tokens: ReadonlyArray<string>): ShellParseResult {
+  const usage = "usage: send IFACE DSTMAC ETHERTYPE HEX";
+  const iface = tokens[1];
+  if (iface === undefined) {
+    return fail("missing_argument", "send", usage);
+  }
+  if (iface.startsWith("-")) {
+    return fail("unknown_flag", "send", `unknown flag: ${iface}`);
+  }
+  const dstMac = tokens[2];
+  const etherTypeText = tokens[3];
+  const hex = tokens[4];
+  if (
+    dstMac === undefined ||
+    etherTypeText === undefined ||
+    hex === undefined
+  ) {
+    return fail("missing_argument", "send", usage);
+  }
+  const extra = tokens[5];
+  if (extra !== undefined) {
+    return fail("unexpected_argument", "send", `unexpected argument: ${extra}`);
+  }
+  if (!isMac(dstMac)) {
+    return fail("invalid_argument", "send", `invalid MAC address: ${dstMac}`);
+  }
+  const etherType = parseEtherTypeValue(etherTypeText);
+  if (etherType === undefined) {
+    return fail(
+      "invalid_argument",
+      "send",
+      `ethertype must be 0..0xFFFF: ${etherTypeText}`,
+    );
+  }
+  if (!/^[0-9a-fA-F]*$/.test(hex)) {
+    return fail("invalid_argument", "send", `payload must be hex: ${hex}`);
+  }
+  if (hex.length % 2 !== 0) {
+    return fail(
+      "invalid_argument",
+      "send",
+      `payload needs an even number of hex digits: ${hex}`,
+    );
+  }
+  return ok({
+    kind: "send",
+    iface,
+    dstMac: MacAddress.parse(dstMac).toString(),
+    etherType,
+    payload: hex.toLowerCase(),
+  });
+}
+
 /** `http-server [PORT]`: one optional listening port, nothing else. */
 function parseHttpServer(tokens: ReadonlyArray<string>): ShellParseResult {
   const portText = tokens[1];
@@ -835,6 +937,8 @@ function parse(line: string): ShellParseResult {
       return parseNc(tokens);
     case "ss":
       return parseSs(tokens);
+    case "send":
+      return parseSend(tokens);
     case "http-server":
       return parseHttpServer(tokens);
     case "curl":

@@ -18,9 +18,13 @@
  * no chunked transfer encoding and no redirects. `http-server` installs an
  * event-driven listener and returns, so the clock only moves when another
  * command (or a test) talks to it.
+ *
+ * Fase 6 adds the packet crafter (F-101): `send` transmits one hand-built
+ * Ethernet frame through `Host.sendRaw()`. It is the CLI half of the feature;
+ * the layered web form is a UI concern and lives outside this package.
  */
 
-import { Ipv4Address } from "@netlab/bytes";
+import { Ipv4Address, MacAddress } from "@netlab/bytes";
 import {
   DEFAULT_DHCP_RETRIES,
   DEFAULT_DHCP_TIMEOUT_US,
@@ -38,6 +42,8 @@ import {
   TcpSocket,
 } from "@netlab/core";
 import {
+  ETHERNET_HEADER_LENGTH,
+  ETHERNET_MIN_FRAME_LENGTH,
   ICMP_CODE_FRAG_NEEDED,
   ICMP_TYPE_DEST_UNREACHABLE,
   ICMP_TYPE_ECHO_REQUEST,
@@ -57,6 +63,7 @@ import {
   formatNcTcpLines,
   formatNcUdpLines,
   formatRouteLines,
+  formatSendLines,
   formatSsLines,
 } from "./format";
 import {
@@ -76,6 +83,7 @@ import {
   type NcUdpCommand,
   type PingCommand,
   parseCommandLine,
+  type SendCommand,
   type ShellCommand,
   type TracerouteCommand,
 } from "./parse";
@@ -146,6 +154,7 @@ const HELP_LINES: ReadonlyArray<string> = [
   "dhclient [IFACE] - obtain an address over DHCP",
   "nc [-u] HOST PORT [HEX] - send a TCP payload (UDP with -u) and print replies",
   "ss - list TCP sockets with state, addresses and cwnd/ssthresh",
+  "send IFACE DSTMAC ETHERTYPE HEX - transmit a hand-built Ethernet frame",
   "http-server [PORT] - serve a fixed HTTP/1.0 page (default 80)",
   "curl http://HOST[:PORT][/PATH] - one HTTP/1.0 GET, print the body",
   "help - this list",
@@ -643,6 +652,8 @@ export class Shell {
         return this.ncTcp(command);
       case "ss":
         return this.ss();
+      case "send":
+        return this.send(command);
       case "http.server":
         return this.httpServer(command);
       case "http.get":
@@ -940,6 +951,39 @@ export class Shell {
       ssthresh: Math.round(socket.ssthresh),
     }));
     return formatSsLines(rows);
+  }
+
+  /**
+   * `send IFACE DSTMAC ETHERTYPE HEX`: transmit a hand-built Ethernet frame
+   * (F-101).
+   *
+   * The frame goes through `Host.sendRaw()`, so no route is consulted and no
+   * ARP request is sent: the destination MAC, ethertype and payload are the
+   * ones the caller wrote. The payload is padded by the serializer when the
+   * frame is shorter than the Ethernet minimum, and the reported size says so.
+   * An unknown interface or a down/unattached one is a typed execution error.
+   */
+  private send(command: SendCommand): Array<string> {
+    this.requireInterface(command.iface, "send");
+    const iface = this.host.getInterface(command.iface);
+    const payload = hexToBytes(command.payload);
+    this.host.sendRaw(
+      command.iface,
+      MacAddress.parse(command.dstMac),
+      command.etherType,
+      payload,
+    );
+    return formatSendLines({
+      iface: command.iface,
+      srcMac: iface.mac.toString(),
+      dstMac: command.dstMac,
+      etherType: command.etherType,
+      payloadBytes: payload.length,
+      wireBytes: Math.max(
+        ETHERNET_HEADER_LENGTH + payload.length,
+        ETHERNET_MIN_FRAME_LENGTH,
+      ),
+    });
   }
 
   /**

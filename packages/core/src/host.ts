@@ -42,6 +42,13 @@
  * covers gratuitous announcements and lets a request resolve a pending entry
  * for the sender. A pending entry owns one retry timer: retries + 1 requests,
  * then the queued frames are dropped as `host unreachable`.
+ *
+ * Fault injection (F-100) adds two cache-level operations and nothing else:
+ * `flushArp()` forgets neighbors (cancelling pending resolutions, which is
+ * what a `ip neigh flush` does) and `restart()` bounces the interfaces before
+ * flushing, so the next send resolves again. Neighbor state is the only host
+ * state a power cycle loses here: UDP sockets and TCP connections belong to
+ * the application that opened them, not to the simulated kernel.
  */
 
 import { Ipv4Address, MacAddress } from "@netlab/bytes";
@@ -851,6 +858,60 @@ export class Host extends Device {
     return this.macFor(this.portOf(ifaceName), Ipv4Address.parse(ip));
   }
 
+  /**
+   * Forget neighbors (F-100, "borrar caché ARP").
+   *
+   * With `ifaceName` only that interface is flushed; without it every
+   * interface is. Resolved and incomplete entries alike are removed, which
+   * means their retry timer is cancelled and the frames queued behind an
+   * unresolved address are dropped: the next send has to resolve again.
+   * Returns the number of entries removed. Throws on an unknown interface.
+   */
+  flushArp(ifaceName?: string): number {
+    const configs =
+      ifaceName === undefined
+        ? [...this.ports.values()]
+        : [this.portOf(ifaceName)];
+    let removed = 0;
+    for (const cfg of configs) {
+      let droppedFrames = 0;
+      // Snapshot the keys: `purge()` deletes while iterating.
+      for (const entry of [...cfg.arp.values()]) {
+        droppedFrames += this.purge(cfg, entry);
+        removed += 1;
+      }
+      if (droppedFrames > 0) {
+        this.log(
+          `${this.id}:${cfg.iface.name}`,
+          "warn",
+          `ARP cache flushed: dropped ${droppedFrames} queued frames`,
+        );
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Simulated power cycle (F-100, "reiniciar un dispositivo").
+   *
+   * Every interface is bounced down and up — the same administrative path
+   * `ip link set` uses, with no boot delay on the virtual clock — and leaves
+   * the host administratively up, like a device that boots with its saved
+   * configuration. The kernel state a reboot loses goes with it: the ARP
+   * cache is purged (timers cancelled, queued frames dropped) and partial
+   * inbound datagrams are discarded. Socket state is application state in
+   * this model, so UDP sockets and TCP connections survive; close them
+   * explicitly when a scenario needs a cold start.
+   */
+  restart(): void {
+    for (const cfg of this.ports.values()) {
+      cfg.iface.up = false;
+      cfg.iface.up = true;
+    }
+    this.flushArp();
+    this.reassembler.clear();
+  }
+
   onFrame(iface: NetworkInterface, frame: Uint8Array): void {
     const parsed = parseEthernet(frame);
     if (!parsed.ok) {
@@ -1616,6 +1677,21 @@ export class Host extends Device {
       "warn",
       `${reason} (${dropped} frames dropped)`,
     );
+  }
+
+  /**
+   * Remove one cache entry without a trace of its own: cancel its retry timer,
+   * forget the queued frames and delete it. Returns the frames dropped so the
+   * caller can report them in a single log line.
+   */
+  private purge(cfg: HostPort, entry: ArpEntry): number {
+    const timer = entry.timer;
+    entry.timer = undefined;
+    timer?.cancel();
+    const dropped = entry.pending.length;
+    entry.pending = [];
+    cfg.arp.delete(entry.ip.toString());
+    return dropped;
   }
 
   private sendArpRequest(cfg: HostPort, targetIp: Ipv4Address): void {

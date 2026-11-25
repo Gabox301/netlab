@@ -13,6 +13,10 @@
  * copy; receivers observe it as a checksum failure, exactly like wire
  * damage. Bandwidth serializes frames per direction through `freeAt`
  * chaining; `queueLimit` bounds in-flight frames (tail drop).
+ *
+ * Fault injection (F-100) is the same `link_down` path: `setUp(false)` cuts
+ * the cable administratively, so both frames handed to `send()` and frames
+ * already in flight are dropped with that reason until `setUp(true)`.
  */
 
 import type { Simulation } from "./sim";
@@ -155,6 +159,18 @@ export class Link {
   /** Attach (or re-attach, for UI rewiring) both endpoints. */
   attach(a: Port, b: Port): void {
     this.ports = [a, b];
+  }
+
+  /**
+   * Set the administrative state (F-100 `cut` / `restore`).
+   *
+   * A cut is a plain flag with two effects: the next `send()` reports
+   * `link_down` immediately, and every frame already scheduled for arrival is
+   * dropped there with the same reason. Nothing crosses a cut cable in either
+   * direction, and restoring it makes the next frame pass as usual.
+   */
+  setUp(up: boolean): void {
+    this.up = up;
   }
 
   /** Transmit a frame from one endpoint toward the other. */

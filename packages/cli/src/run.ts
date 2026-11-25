@@ -9,6 +9,11 @@
  * the probe bodies execute synchronously inside the scheduled event, so
  * the transcripts line up with the traces. The function is async only to
  * flush the (already resolved) shell promises after the run.
+ *
+ * Fault actions (F-100) are resolved eagerly — an unknown link, host or
+ * interface fails before the clock moves — and applied at their virtual time:
+ * `cut` / `restore` flip the link's administrative state, `restart` power
+ * cycles a host and `flushArp` wipes its neighbor cache.
  */
 
 import {
@@ -94,6 +99,7 @@ export async function runScenario(
   const routers = new Map<string, Router>();
   const shells = new Map<string, Shell>();
   const ifaces = new Map<string, NetworkInterface>();
+  const links = new Map<string, Link>();
   const pending: Array<Promise<ShellTranscript>> = [];
 
   const ifaceKey = (node: string, iface: string): string => `${node}:${iface}`;
@@ -164,20 +170,22 @@ export async function runScenario(
     }
   }
 
-  for (const link of scenario.links) {
-    const a = ifaces.get(ifaceKey(link.a.node, link.a.iface));
-    const b = ifaces.get(ifaceKey(link.b.node, link.b.iface));
+  for (const def of scenario.links) {
+    const a = ifaces.get(ifaceKey(def.a.node, def.a.iface));
+    const b = ifaces.get(ifaceKey(def.b.node, def.b.iface));
     if (a === undefined) {
       throw new Error(
-        `link ${JSON.stringify(link.id)}: unknown interface ${link.a.node}:${link.a.iface}`,
+        `link ${JSON.stringify(def.id)}: unknown interface ${def.a.node}:${def.a.iface}`,
       );
     }
     if (b === undefined) {
       throw new Error(
-        `link ${JSON.stringify(link.id)}: unknown interface ${link.b.node}:${link.b.iface}`,
+        `link ${JSON.stringify(def.id)}: unknown interface ${def.b.node}:${def.b.iface}`,
       );
     }
-    connect(new Link(sim, link.id, link.params, bus), a, b);
+    const link = new Link(sim, def.id, def.params, bus);
+    connect(link, a, b);
+    links.set(def.id, link);
   }
 
   const hostOf = (path: string, id: string): Host => {
@@ -190,9 +198,55 @@ export async function runScenario(
     return host;
   };
 
+  const linkOf = (path: string, id: string): Link => {
+    const link = links.get(id);
+    if (link === undefined) {
+      throw new Error(`${path}: unknown link ${JSON.stringify(id)}`);
+    }
+    return link;
+  };
+
   const runAction = (action: ScenarioAction, index: number): void => {
     const path = `actions[${index}]`;
     const atUs = parseDurationToUs(action.at ?? 0, 0, `${path}.at`);
+    if ("cut" in action) {
+      const target = linkOf(path, action.cut);
+      sim.scheduleAt(atUs, () => {
+        target.setUp(false);
+      });
+      return;
+    }
+    if ("restore" in action) {
+      const target = linkOf(path, action.restore);
+      sim.scheduleAt(atUs, () => {
+        target.setUp(true);
+      });
+      return;
+    }
+    if ("restart" in action) {
+      const host = hostOf(path, action.restart);
+      sim.scheduleAt(atUs, () => {
+        host.restart();
+      });
+      return;
+    }
+    if ("flushArp" in action) {
+      const host = hostOf(path, action.flushArp);
+      const iface = action.iface;
+      if (
+        iface !== undefined &&
+        !host.interfaces.some((candidate) => candidate.name === iface)
+      ) {
+        // Fail fast, before the clock moves, on a mistyped interface.
+        throw new Error(
+          `${path}.iface: ${host.id}: no interface named ${JSON.stringify(iface)}`,
+        );
+      }
+      sim.scheduleAt(atUs, () => {
+        host.flushArp(iface);
+      });
+      return;
+    }
     if ("exec" in action) {
       const host = hostOf(path, action.host);
       let shell = shells.get(action.host);

@@ -10,7 +10,7 @@ Slice vertical ODD sobre netlab-roadmap.md § Fase 6. Sin atajos: cada ejercicio
 ## Tasks
 
 - [x] T1 (S1) Formato de ejercicios + validadores + `netlab validate` (F-110 a F-112).
-- [ ] T2 (S1) Inyección de fallas + constructor de paquetes (F-100, F-101). Commit.
+- [x] T2 (S1) Inyección de fallas + constructor de paquetes (F-100, F-101 shell; form web → T5).
 - [ ] T3 (S1) Catálogo inicial de ejercicios con soluciones de referencia (25 del roadmap). Commit.
 - [ ] T4 (S1) Trainer de subnetting (F-117). Commit.
 - [ ] T5 (S1) Rutas de aprendizaje (F-115) + panel UI con pistas y puntaje (F-113, F-114). Commit.

@@ -50,6 +50,7 @@ export {
   type NcUdpCommand,
   type PingCommand,
   parseCommandLine,
+  type SendCommand,
   type ShellCommand,
   type ShellParseResult,
   type SsCommand,

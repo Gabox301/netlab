@@ -3,8 +3,15 @@
  *
  * The roadmap never defined `TopologyJSON`, so this slice owns the schema:
  * nodes (host/switch/hub), point-to-point links with impairments, and
- * timed `sendTo` actions. Everything is serializable — no functions cross
- * the JSON boundary (`HostOptions.onPayload` stays code-side).
+ * timed actions — traffic (`send`, `ping`, `exec`) plus the fault-injection
+ * actions of F-100 (`cut`, `restore`, `restart`, `flushArp`). Everything is
+ * serializable — no functions cross the JSON boundary
+ * (`HostOptions.onPayload` stays code-side).
+ *
+ * An action is recognized by its discriminator key, in this order: `cut`,
+ * `restore`, `restart`, `flushArp`, `exec`, `ping`, then the `sendTo` shape
+ * that needs `iface` + `destIp`. The fault actions therefore never require a
+ * `host` field, and every failure keeps its `actions[i]` path.
  */
 
 import type { LinkParams } from "@netlab/core";
@@ -122,10 +129,63 @@ export interface ScenarioShellAction {
   exec: string;
 }
 
+/**
+ * Compatibility surface for the action editor that predates fault injection
+ * (`packages/web`, owned by T5). That editor rewrites the `host` of every
+ * action and reads `host` / `iface` / `destIp` from the whole union, so the
+ * fault variants accept a `host` they never use and answer `undefined` for
+ * the traffic-only fields. The scenario parser reads neither: a fault action
+ * targets a link id or a device id in its own key. T5 removes this shim.
+ */
+interface ScenarioFaultFields {
+  host?: string;
+  readonly destIp?: undefined;
+}
+
+/**
+ * Fault injection (F-100): cut one cable. `cut` is the link id.
+ * Restoring it is {@link ScenarioRestoreAction}.
+ */
+export interface ScenarioCutAction extends ScenarioFaultFields {
+  /** Virtual time the cable is cut. Default 0. */
+  at?: DurationInput;
+  cut: string;
+  readonly iface?: undefined;
+}
+
+/** Fault injection (F-100): plug the cable back in. */
+export interface ScenarioRestoreAction extends ScenarioFaultFields {
+  /** Virtual time the cable comes back. Default 0. */
+  at?: DurationInput;
+  restore: string;
+  readonly iface?: undefined;
+}
+
+/** Fault injection (F-100): power-cycle a host (bounce interfaces + flush ARP). */
+export interface ScenarioRestartAction extends ScenarioFaultFields {
+  /** Virtual time of the restart. Default 0. */
+  at?: DurationInput;
+  restart: string;
+  readonly iface?: undefined;
+}
+
+/** Fault injection (F-100): wipe the ARP cache of one host (and iface). */
+export interface ScenarioFlushArpAction extends ScenarioFaultFields {
+  /** Virtual time of the flush. Default 0. */
+  at?: DurationInput;
+  flushArp: string;
+  /** Interface to flush; omitted means every interface. */
+  iface?: string;
+}
+
 export type ScenarioAction =
   | ScenarioSendAction
   | ScenarioPingAction
-  | ScenarioShellAction;
+  | ScenarioShellAction
+  | ScenarioCutAction
+  | ScenarioRestoreAction
+  | ScenarioRestartAction
+  | ScenarioFlushArpAction;
 
 export interface ScenarioLink {
   id: string;
@@ -565,7 +625,6 @@ function optBoolean(
 
 function parseAction(value: unknown, path: string): ScenarioAction {
   const obj = reqRecord(value, path);
-  const host = reqString(obj, "host", path);
   let at: DurationInput | undefined;
   if (obj["at"] !== undefined) {
     const raw = obj["at"];
@@ -575,6 +634,47 @@ function parseAction(value: unknown, path: string): ScenarioAction {
     parseDurationToUs(raw, 0, `${path}.at`);
     at = raw;
   }
+  // Fault actions (F-100) target a link or a host, so they are recognized
+  // before the `host` requirement of the traffic actions.
+  if (obj["cut"] !== undefined) {
+    const action: ScenarioCutAction = { cut: reqString(obj, "cut", path) };
+    if (at !== undefined) {
+      action.at = at;
+    }
+    return action;
+  }
+  if (obj["restore"] !== undefined) {
+    const action: ScenarioRestoreAction = {
+      restore: reqString(obj, "restore", path),
+    };
+    if (at !== undefined) {
+      action.at = at;
+    }
+    return action;
+  }
+  if (obj["restart"] !== undefined) {
+    const action: ScenarioRestartAction = {
+      restart: reqString(obj, "restart", path),
+    };
+    if (at !== undefined) {
+      action.at = at;
+    }
+    return action;
+  }
+  if (obj["flushArp"] !== undefined) {
+    const action: ScenarioFlushArpAction = {
+      flushArp: reqString(obj, "flushArp", path),
+    };
+    const iface = optString(obj, "iface", path);
+    if (iface !== undefined) {
+      action.iface = iface;
+    }
+    if (at !== undefined) {
+      action.at = at;
+    }
+    return action;
+  }
+  const host = reqString(obj, "host", path);
   if (obj["exec"] !== undefined) {
     const action: ScenarioShellAction = {
       host,

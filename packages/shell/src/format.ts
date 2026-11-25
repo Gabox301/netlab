@@ -15,6 +15,7 @@ import {
   prefixToMask,
   type TcpState,
 } from "@netlab/core";
+import { ETHERNET_HEADER_LENGTH } from "@netlab/protocols";
 import type { NeighborEntry } from "./neighbors";
 
 /** `addr` block: name/state/mtu, MAC, then the optional IPv4 identity. */
@@ -356,6 +357,37 @@ export function formatSsLines(
     );
   }
   return lines;
+}
+
+/** One crafted frame as `send` reports it (F-101). */
+export interface SendFrameView {
+  readonly iface: string;
+  readonly srcMac: string;
+  readonly dstMac: string;
+  readonly etherType: number;
+  /** Payload bytes the caller wrote. */
+  readonly payloadBytes: number;
+  /** Bytes the interface transmits, Ethernet padding included. */
+  readonly wireBytes: number;
+}
+
+/**
+ * `send` output: the frame header as written, then its size. Padding is called
+ * out because a short hand-built frame still occupies 60 bytes on the wire,
+ * which is exactly the detail a malformed-frame exercise cares about.
+ */
+export function formatSendLines(view: SendFrameView): Array<string> {
+  const header = ETHERNET_HEADER_LENGTH;
+  const padding = view.wireBytes - header - view.payloadBytes;
+  const size =
+    padding > 0
+      ? `sent ${view.wireBytes} bytes (${header} header + ${view.wireBytes - header} payload, padded from ${view.payloadBytes})`
+      : `sent ${view.wireBytes} bytes (${header} header + ${view.payloadBytes} payload)`;
+  return [
+    `send ${view.iface} ${view.srcMac} -> ${view.dstMac} ` +
+      `ethertype 0x${view.etherType.toString(16).padStart(4, "0")}`,
+    size,
+  ];
 }
 
 /** One HTTP response as `curl` prints it: status plus the decoded body. */
