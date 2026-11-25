@@ -1,7 +1,8 @@
 /**
- * TCP machine (F-54/55): three-way handshake, simultaneous open, four-way
- * close with TIME_WAIT expiry, RST for closed ports and a handshake through
- * a router.
+ * TCP machine (F-54/55/56): three-way handshake, simultaneous open, four-way
+ * close with TIME_WAIT expiry, RST for closed ports, a handshake through a
+ * router, and ordered payload transfer with cumulative ACKs and a fixed send
+ * window.
  *
  * Every run is deterministic: explicit MACs, explicit ISNs and the
  * simulation clock driven by `runAll()` (no timers left) or `runUntil()`
@@ -25,7 +26,13 @@ import { Host, type HostTcpSegment } from "../src/host";
 import { Link } from "../src/link";
 import { Router } from "../src/route";
 import { Simulation } from "../src/sim";
-import { DEFAULT_TIME_WAIT_US, TcpSocket, type TcpState } from "../src/tcp";
+import {
+  DEFAULT_MSS,
+  DEFAULT_SEND_WINDOW,
+  DEFAULT_TIME_WAIT_US,
+  TcpSocket,
+  type TcpState,
+} from "../src/tcp";
 import { type Trace, TraceBus } from "../src/trace";
 
 const LATENCY_US = 10;
@@ -431,5 +438,195 @@ describe("tcp reset and abort (F-55)", () => {
     sim.runUntil(sim.now + 10 * LATENCY_US);
     expect(client.state).toBe("CLOSED");
     expect(server.state).toBe("CLOSED");
+  });
+});
+
+/** Deterministic byte pattern: offset-dependent, so ordering errors show up. */
+function patterned(length: number, salt = 0): Uint8Array {
+  const out = new Uint8Array(length);
+  for (let i = 0; i < length; i += 1) {
+    out[i] = (i * 31 + salt * 7 + 11) & 0xff;
+  }
+  return out;
+}
+
+/**
+ * Inject one hand-built segment from `from`'s side of the connection, with
+ * full control over SEQ and ACK (the socket API assigns them automatically).
+ */
+function inject(
+  from: TcpSocket,
+  to: TcpSocket,
+  opts: {
+    seq: number;
+    ack: number;
+    payload?: Uint8Array;
+    fin?: boolean;
+  },
+): void {
+  const remoteIp = from.remoteIp ?? "";
+  const sourceIp = from.host.routeSourceIp(remoteIp);
+  const bytes = serializeTcp(
+    {
+      srcPort: from.localPort ?? 0,
+      dstPort: to.localPort ?? 0,
+      seq: opts.seq,
+      ack: opts.ack,
+      flags: { ...NO_FLAGS, ack: true, fin: opts.fin === true },
+      window: 4096,
+      urgent: 0,
+      payload: opts.payload ?? new Uint8Array(0),
+    },
+    sourceIp,
+    Ipv4Address.parse(remoteIp),
+  );
+  from.host.sendTcpSegment(remoteIp, bytes);
+}
+
+describe("tcp buffers and cumulative ACKs (F-56)", () => {
+  test("echoes a multi-segment payload byte for byte", () => {
+    const { sim, bus, client, server } = connected();
+    const payload = patterned(3 * DEFAULT_MSS + 17);
+    const delivered: Array<Uint8Array> = [];
+    server.onData = (data) => {
+      delivered.push(data);
+      server.send(data);
+    };
+
+    client.send(payload);
+    sim.runAll();
+
+    // The server got the whole payload, in as many segments as MSS allows.
+    expect(delivered).toHaveLength(Math.ceil(payload.length / DEFAULT_MSS));
+    expect(server.rcvNxt).toBe(CLIENT_ISN + 1 + payload.length);
+    expect(server.read()).toEqual(payload);
+
+    // The echo came back identical, byte by byte.
+    const received = client.read();
+    expect(received).toHaveLength(payload.length);
+    for (let i = 0; i < payload.length; i += 1) {
+      expect(received[i]).toBe(payload[i]);
+    }
+    expect(client.rcvNxt).toBe(SERVER_ISN + 1 + payload.length);
+
+    // Every data segment the client sent was acknowledged cumulatively.
+    const acks = tcpSegments(bus.drain(), "b").filter(
+      (seg) => seg.flags.ack && !seg.flags.syn,
+    );
+    expect(acks.length).toBeGreaterThanOrEqual(
+      Math.ceil(payload.length / DEFAULT_MSS),
+    );
+    expect(acks.at(-1)?.ack).toBe(CLIENT_ISN + 1 + payload.length);
+  });
+
+  test("buffers out-of-order data and delivers it in order", () => {
+    const { sim, bus, client, server } = connected();
+    const chunks: Array<Uint8Array> = [];
+    client.onData = (data) => chunks.push(data);
+    const base = (server.iss ?? 0) + 1;
+    const first = patterned(DEFAULT_MSS, 1);
+    const second = patterned(DEFAULT_MSS, 2);
+
+    // The second segment arrives before the first: nothing is delivered yet.
+    inject(server, client, {
+      seq: base + DEFAULT_MSS,
+      ack: server.sndNxt ?? 0,
+      payload: second,
+    });
+    sim.runUntil(sim.now + 4 * LATENCY_US);
+    expect(chunks).toHaveLength(0);
+    expect(client.rcvNxt).toBe(base);
+
+    // The gap is filled: both segments are delivered in sequence order.
+    inject(server, client, {
+      seq: base,
+      ack: server.sndNxt ?? 0,
+      payload: first,
+    });
+    sim.runUntil(sim.now + 4 * LATENCY_US);
+    expect(client.rcvNxt).toBe(base + 2 * DEFAULT_MSS);
+    expect(client.read()).toEqual(
+      new Uint8Array([...Array.from(first), ...Array.from(second)]),
+    );
+
+    // One ACK per valid segment; the cumulative ACK jumps over the gap.
+    const acks = tcpSegments(bus.drain(), "a").filter(
+      (seg) => seg.flags.ack && !seg.flags.syn && !seg.flags.fin,
+    );
+    expect(acks.map((seg) => seg.ack)).toEqual([base, base + 2 * DEFAULT_MSS]);
+
+    // A duplicate is re-acknowledged without being delivered twice.
+    inject(server, client, {
+      seq: base,
+      ack: server.sndNxt ?? 0,
+      payload: first,
+    });
+    sim.runUntil(sim.now + 4 * LATENCY_US);
+    expect(client.rcvNxt).toBe(base + 2 * DEFAULT_MSS);
+    expect(client.read()).toHaveLength(0);
+    const duplicateAck = tcpSegments(bus.drain(), "a").filter(
+      (seg) => seg.flags.ack && !seg.flags.syn && !seg.flags.fin,
+    );
+    expect(duplicateAck.map((seg) => seg.ack)).toEqual([
+      base + 2 * DEFAULT_MSS,
+    ]);
+  });
+
+  test("advances SND.UNA with valid ACKs and respects the send window", () => {
+    const { sim, bus, client, server } = connected();
+    const payload = patterned(6 * DEFAULT_MSS);
+    const start = CLIENT_ISN + 1;
+
+    expect(DEFAULT_SEND_WINDOW).toBe(4 * DEFAULT_MSS);
+    client.send(payload);
+
+    // Only the fixed window is in flight; the rest waits in the send buffer.
+    expect(client.sndUna).toBe(start);
+    expect(client.sndNxt).toBe(start + DEFAULT_SEND_WINDOW);
+    const firstBurst = tcpSegments(bus.drain(), "a").filter(
+      (seg) => seg.payload.length > 0,
+    );
+    expect(firstBurst).toHaveLength(DEFAULT_SEND_WINDOW / DEFAULT_MSS);
+
+    // An ACK beyond SND.NXT is invalid and must leave the window untouched.
+    inject(server, client, {
+      seq: server.sndNxt ?? 0,
+      ack: (client.sndNxt ?? 0) + 1000,
+    });
+    sim.runUntil(sim.now + LATENCY_US + 1);
+    expect(client.sndUna).toBe(start);
+
+    // Real ACKs open the window: the remaining two segments are sent.
+    sim.runAll();
+    expect(server.read()).toEqual(payload);
+    expect(client.sndUna).toBe(start + payload.length);
+    expect(client.sndNxt).toBe(start + payload.length);
+    const allData = tcpSegments(bus.drain(), "a").filter(
+      (seg) => seg.payload.length > 0,
+    );
+    expect(firstBurst.length + allData.length).toBe(
+      payload.length / DEFAULT_MSS,
+    );
+  });
+
+  test("queues the FIN behind data that close() finds in flight", () => {
+    const { sim, bus, client, server } = connected();
+    const payload = patterned(DEFAULT_MSS + 3);
+
+    client.send(payload);
+    client.close();
+    expect(client.state).toBe("FIN_WAIT_1");
+    sim.runAll();
+
+    // Every byte arrived before the FIN, and the close completed.
+    expect(server.read()).toEqual(payload);
+    expect(server.state).toBe("CLOSE_WAIT");
+    expect(client.state).toBe("FIN_WAIT_2");
+    const fromClient = tcpSegments(bus.drain(), "a");
+    const data = fromClient.filter((seg) => seg.payload.length > 0);
+    const fin = fromClient.find((seg) => seg.flags.fin);
+    expect(data).toHaveLength(2);
+    // The FIN takes the sequence number right after the last data byte.
+    expect(fin?.seq).toBe(CLIENT_ISN + 1 + payload.length);
   });
 });
