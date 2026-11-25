@@ -17,6 +17,13 @@
  * `onEchoReply` / `onIcmpError` for the shell. The original `onPayload` hook
  * still receives every accepted non-ARP payload, IPv4 included.
  *
+ * UDP sockets (F-51/52) are a thin port layer on top of IPv4: `bindUdp()`
+ * registers a listener per port (`onUdp` is the fallback for sockets bound
+ * without one), `sendUdp()` builds the datagram and follows the normal route
+ * and ARP path, and a datagram for an unbound port is answered with ICMP
+ * Destination Unreachable / Port Unreachable. Ephemeral source ports come
+ * from `sim.random`, never `Math.random()`.
+ *
  * Cache discipline: every ARP packet refreshes `senderIp -> senderMac`, which
  * covers gratuitous announcements and lets a request resolve a pending entry
  * for the sender. A pending entry owns one retry timer: retries + 1 requests,
@@ -31,21 +38,25 @@ import {
   ETHERTYPE_ARP,
   ETHERTYPE_IPV4,
   ICMP_CODE_FRAG_NEEDED,
+  ICMP_CODE_PORT_UNREACHABLE,
   ICMP_TYPE_DEST_UNREACHABLE,
   ICMP_TYPE_ECHO_REPLY,
   ICMP_TYPE_ECHO_REQUEST,
   type IcmpMessage,
   IPV4_PROTOCOL_ICMP,
+  IPV4_PROTOCOL_UDP,
   IPV4_VERSION,
   type Ipv4Packet,
   parseArp,
   parseEthernet,
   parseIcmp,
   parseIpv4,
+  parseUdp,
   serializeArp,
   serializeEthernet,
   serializeIcmp,
   serializeIpv4,
+  serializeUdp,
   shouldAccept,
 } from "@netlab/protocols";
 import {
@@ -145,6 +156,41 @@ export interface HostPingOptions extends HostIpv4SendOptions {
   data?: Uint8Array;
 }
 
+/** A UDP datagram delivered to a listener, as reported by `bindUdp`/`onUdp`. */
+export interface HostUdpDatagram {
+  iface: string;
+  srcIp: string;
+  dstIp: string;
+  srcPort: number;
+  dstPort: number;
+  /** Datagram payload (a copy: mutating it cannot corrupt the frame). */
+  payload: Uint8Array;
+}
+
+/** Listener for one bound UDP port (or the `onUdp` fallback). */
+export type HostUdpHandler = (datagram: HostUdpDatagram) => void;
+
+/** A bound UDP port. */
+export interface HostUdpSocket {
+  readonly port: number;
+  /** Stop delivering datagrams to this socket. Idempotent. */
+  close(): void;
+}
+
+/** Options for `Host.sendUdp()`. */
+export interface HostUdpSendOptions {
+  /** Source port; default an ephemeral port from the dynamic range. */
+  srcPort?: number;
+  /** Egress interface; default the configured route/gateway. */
+  iface?: string;
+}
+
+/** Result of queueing one UDP datagram. */
+export interface HostUdpSendHandle {
+  iface: string;
+  srcPort: number;
+}
+
 /** Result of queueing one Echo Request. */
 export interface HostPingHandle {
   iface: string;
@@ -204,6 +250,8 @@ export interface HostOptions {
   onEchoReply?: (reply: HostEchoReply) => void;
   /** Initial ICMP error hook (traceroute, PMTU discovery). */
   onIcmpError?: (error: HostIcmpError) => void;
+  /** Initial fallback listener for UDP sockets bound without a handler. */
+  onUdp?: HostUdpHandler;
   /** How long partial inbound datagrams stay buffered. */
   reassemblyTimeoutUs?: number;
   /** Fragment-payload memory budget for inbound reassembly. */
@@ -228,6 +276,11 @@ interface ArpEntry {
   pending: Array<PendingFrame>;
 }
 
+/** A bound UDP port and its optional per-port listener. */
+interface UdpSocketEntry {
+  handler: HostUdpHandler | undefined;
+}
+
 /** Interface plus its addressing state. */
 interface HostPort {
   iface: NetworkInterface;
@@ -245,6 +298,14 @@ const PING_IDENTIFIER = 0x4e4c;
 
 /** Unanswered requests remembered for RTT calculation (oldest evicted). */
 const MAX_PENDING_PINGS = 1024;
+
+/** RFC 6335 dynamic port range used for ephemeral UDP source ports. */
+const UDP_EPHEMERAL_MIN = 49152;
+const UDP_EPHEMERAL_MAX = 65535;
+const UDP_EPHEMERAL_PORTS = UDP_EPHEMERAL_MAX - UDP_EPHEMERAL_MIN + 1;
+
+/** Bytes of the offending datagram quoted in an ICMP error (RFC 792). */
+const ICMP_QUOTED_BYTES = 8;
 
 function checkByteField(name: string, value: number): void {
   if (!Number.isInteger(value) || value < 0 || value > 0xff) {
@@ -290,6 +351,8 @@ export class Host extends Device {
   onEchoReply: ((reply: HostEchoReply) => void) | undefined = undefined;
   /** Called for every ICMP error addressed to this host. */
   onIcmpError: ((error: HostIcmpError) => void) | undefined = undefined;
+  /** Fallback listener for UDP sockets bound without their own handler. */
+  onUdp: HostUdpHandler | undefined = undefined;
 
   private readonly arpTtlUs: number;
   private readonly arpTimeoutUs: number;
@@ -298,8 +361,10 @@ export class Host extends Device {
   private readonly ports = new Map<string, HostPort>();
   private readonly reassembler: Reassembler;
   private readonly pendingPings = new Map<string, number>();
+  private readonly udpSockets = new Map<number, UdpSocketEntry>();
   private ipId = 1;
   private pingSequence = 0;
+  private udpEphemeralNext: number | undefined = undefined;
 
   constructor(
     sim: Simulation,
@@ -327,6 +392,7 @@ export class Host extends Device {
     this.onPayload = opts.onPayload;
     this.onEchoReply = opts.onEchoReply;
     this.onIcmpError = opts.onIcmpError;
+    this.onUdp = opts.onUdp;
     const reassembly: ReassemblyOptions = {
       onExpire: (expiry) =>
         this.log(
@@ -537,6 +603,71 @@ export class Host extends Device {
       dontFragment: opts.dontFragment ?? false,
       sentAt,
     };
+  }
+
+  /**
+   * Listen for UDP datagrams addressed to `port`.
+   *
+   * Datagrams go to `handler`; a socket bound without one falls back to
+   * `onUdp`. A second bind of the same port throws, and `close()` stops
+   * delivery (idempotent).
+   */
+  bindUdp(port: number, handler?: HostUdpHandler): HostUdpSocket {
+    checkU16Field("port", port);
+    if (this.udpSockets.has(port)) {
+      throw new Error(`${this.id}: UDP port ${port} is already bound`);
+    }
+    const entry: UdpSocketEntry = { handler };
+    this.udpSockets.set(port, entry);
+    return {
+      port,
+      close: (): void => {
+        if (this.udpSockets.get(port) === entry) {
+          this.udpSockets.delete(port);
+        }
+      },
+    };
+  }
+
+  /**
+   * Send one UDP datagram through the configured route (or `opts.iface`).
+   *
+   * The source port defaults to an ephemeral port in 49152..65535. Throws
+   * synchronously on routing/ARP setup errors, exactly like `sendTo()`.
+   */
+  sendUdp(
+    destIp: string,
+    destPort: number,
+    payload: Uint8Array,
+    opts: HostUdpSendOptions = {},
+  ): HostUdpSendHandle {
+    checkU16Field("destPort", destPort);
+    const destination = Ipv4Address.parse(destIp);
+    // Select the path before touching any state so a routing error is a
+    // plain synchronous throw with nothing queued (same contract as sendTo).
+    const path = this.interfaceFor(destination, opts.iface);
+    const ip = path.cfg.ip;
+    if (ip === undefined) {
+      throw new Error(
+        `${this.id}:${path.cfg.iface.name}: no IPv4 address configured`,
+      );
+    }
+    const srcPort = opts.srcPort ?? this.allocateUdpPort();
+    checkU16Field("srcPort", srcPort);
+    const datagram = serializeUdp(
+      { srcPort, dstPort: destPort, payload },
+      ip,
+      destination,
+    );
+    this.emitIpv4(
+      path.cfg,
+      destination,
+      IPV4_PROTOCOL_UDP,
+      datagram,
+      path.nextHop,
+      {},
+    );
+    return { iface: path.cfg.iface.name, srcPort };
   }
 
   /** Transmit a frame with an explicit destination MAC, bypassing ARP. */
@@ -822,6 +953,10 @@ export class Host extends Device {
   }
 
   private deliverIpv4(iface: NetworkInterface, packet: Ipv4Packet): void {
+    if (packet.header.protocol === IPV4_PROTOCOL_UDP) {
+      this.receiveUdp(iface, packet);
+      return;
+    }
     if (packet.header.protocol !== IPV4_PROTOCOL_ICMP) {
       return;
     }
@@ -881,6 +1016,126 @@ export class Host extends Device {
         `cannot answer echo from ${source}: ${errorMessage(err)}`,
       );
     }
+  }
+
+  /**
+   * Demultiplex one UDP datagram by destination port (F-51).
+   *
+   * A bound socket takes the datagram (its own handler, else `onUdp`); a
+   * datagram for no bound port is answered with ICMP Port Unreachable
+   * (F-52), never delivered to the fallback hook.
+   */
+  private receiveUdp(iface: NetworkInterface, packet: Ipv4Packet): void {
+    const header = packet.header;
+    const parsed = parseUdp(packet.payload, {
+      src: header.src,
+      dst: header.dst,
+    });
+    if (!parsed.ok) {
+      this.log(
+        `${this.id}:${iface.name}`,
+        "warn",
+        `dropped UDP ${header.src} -> ${header.dst}: ${parsed.error.message}`,
+      );
+      return;
+    }
+    const datagram = parsed.value;
+    const socket = this.udpSockets.get(datagram.dstPort);
+    if (socket === undefined) {
+      this.sendPortUnreachable(iface, packet, datagram.dstPort);
+      return;
+    }
+    const handler = socket.handler ?? this.onUdp;
+    if (handler === undefined) {
+      this.log(
+        `${this.id}:${iface.name}`,
+        "warn",
+        `UDP port ${datagram.dstPort} is bound without a handler: dropped ` +
+          `${datagram.payload.length} bytes from ${header.src}:${datagram.srcPort}`,
+      );
+      return;
+    }
+    handler({
+      iface: iface.name,
+      srcIp: header.src.toString(),
+      dstIp: header.dst.toString(),
+      srcPort: datagram.srcPort,
+      dstPort: datagram.dstPort,
+      payload: datagram.payload,
+    });
+  }
+
+  /**
+   * Answer a datagram for a closed port with ICMP Port Unreachable (F-52).
+   *
+   * The error quotes the offending header plus 8 payload bytes (RFC 792) and
+   * follows the normal route back, sourced from the ingress address; routing
+   * failures are logged, never thrown out of the receive path.
+   */
+  private sendPortUnreachable(
+    iface: NetworkInterface,
+    offending: Ipv4Packet,
+    port: number,
+  ): void {
+    const ingress = this.portOf(iface.name);
+    // RFC 792/1812: never quote a non-initial fragment in an ICMP error.
+    if (ingress.ip === undefined || offending.header.fragmentOffset > 0) {
+      return;
+    }
+    const embedded = serializeIpv4(
+      offending.header,
+      offending.payload.slice(0, ICMP_QUOTED_BYTES),
+    );
+    const message: IcmpMessage = {
+      kind: "error",
+      type: ICMP_TYPE_DEST_UNREACHABLE,
+      code: ICMP_CODE_PORT_UNREACHABLE,
+      unused: 0,
+      embedded,
+    };
+    const source = offending.header.src;
+    try {
+      const path = this.interfaceFor(source);
+      this.emitIpv4(
+        path.cfg,
+        source,
+        IPV4_PROTOCOL_ICMP,
+        serializeIcmp(message),
+        path.nextHop,
+        {},
+        ingress.ip,
+      );
+    } catch (err) {
+      this.log(
+        `${this.id}:${iface.name}`,
+        "warn",
+        `cannot answer UDP port ${port} from ${source}: ${errorMessage(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Next ephemeral UDP source port: a random start in the dynamic range,
+   * then sequential, skipping ports bound locally.
+   */
+  private allocateUdpPort(): number {
+    const first = this.udpEphemeralNext;
+    const start =
+      first ??
+      UDP_EPHEMERAL_MIN +
+        Math.floor(this.sim.random.next() * UDP_EPHEMERAL_PORTS);
+    for (let offset = 0; offset < UDP_EPHEMERAL_PORTS; offset += 1) {
+      const port =
+        UDP_EPHEMERAL_MIN +
+        ((start - UDP_EPHEMERAL_MIN + offset) % UDP_EPHEMERAL_PORTS);
+      if (!this.udpSockets.has(port)) {
+        this.udpEphemeralNext =
+          UDP_EPHEMERAL_MIN +
+          ((port - UDP_EPHEMERAL_MIN + 1) % UDP_EPHEMERAL_PORTS);
+        return port;
+      }
+    }
+    throw new Error(`${this.id}: no free ephemeral UDP port`);
   }
 
   private notifyEchoReply(

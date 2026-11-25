@@ -66,6 +66,13 @@ export {
   serializeIpv4,
 } from "./ipv4";
 export {
+  parseUdp,
+  serializeUdp,
+  UDP_HEADER_LENGTH,
+  type UdpDatagram,
+  type UdpSegment,
+} from "./udp";
+export {
   isVlanId,
   parseEthernetWithVlan,
   parseTaggedEthernet,
