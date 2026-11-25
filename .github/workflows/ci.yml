@@ -16,3 +16,68 @@ jobs:
       - run: bun test
       - run: bunx tsc --noEmit
       - run: bunx biome check .
+
+  # S2 oracle for F-120: a third-party dissector has to open the captures the
+  # CLI writes. `bun test` pins the bytes and the CLI behaviour everywhere;
+  # locally, without tshark, only that structural half runs (bun test), so the
+  # expert/decode checks below are the CI-only validation.
+  pcap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.5"
+      - run: bun install
+      - name: Install tshark
+        run: |
+          echo "wireshark-common wireshark-common/install-setuid boolean true" | sudo debconf-set-selections
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark
+      - name: Generate captures with the CLI
+        run: |
+          echo "tshark is the S2 oracle here; without it locally, run bun test for the structural checks"
+          mkdir -p pcaps
+          bun packages/cli/src/main.ts pcap packages/cli/fixtures/dos-subredes.json -o pcaps/icmp.pcap --until 100ms
+          bun packages/cli/src/main.ts pcap packages/exercises/solutions/svc-dns-broken.json -o pcaps/dns.pcap --until 100ms
+          bun packages/cli/src/main.ts pcap packages/exercises/solutions/tcp-zero-window.json -o pcaps/tcp.pcap --until 100ms
+      - name: tshark opens every capture without errors or checksum warnings
+        run: |
+          status=0
+          for f in pcaps/*.pcap; do
+            echo "::group::tshark -r $f -q -z expert"
+            tshark -r "$f" -q -z expert || status=1
+            echo "::endgroup::"
+            # Malformed frames and checksum mismatches are the S2 failures. A
+            # TCP "retransmission" warning is expected and allowed: a capture
+            # of the whole network records each transmission once per link,
+            # and classic pcap has no interface field to tell those views
+            # apart (per-interface capture is F-122).
+            expert=$(tshark -r "$f" \
+              -o ip.check_checksum:true \
+              -o tcp.check_checksum:true \
+              -o udp.check_checksum:true \
+              -T fields -e frame.number -e _ws.expert.message)
+            if printf '%s\n' "$expert" | grep -qiE 'malformed|checksum|error'; then
+              echo "::error::$f has expert errors or checksum warnings"
+              printf '%s\n' "$expert" | grep -iE 'malformed|checksum|error'
+              status=1
+            fi
+          done
+          exit $status
+      - name: tshark decodes the DNS, TCP and ICMP traffic
+        run: |
+          set -euo pipefail
+          dns=$(tshark -r pcaps/dns.pcap -Y dns -T fields -e dns.qry.name)
+          echo "DNS query names:"
+          echo "$dns"
+          echo "$dns" | grep -qx "web.lab"
+          syn=$(tshark -r pcaps/tcp.pcap \
+            -Y 'tcp.flags.syn == 1 && tcp.flags.ack == 0' \
+            -T fields -e tcp.dstport | sort -u)
+          echo "TCP SYN destination ports:"
+          echo "$syn"
+          echo "$syn" | grep -qx "80"
+          icmp=$(tshark -r pcaps/icmp.pcap -Y icmp -T fields -e frame.number | wc -l)
+          echo "ICMP packets: $icmp"
+          test "$icmp" -gt 0
