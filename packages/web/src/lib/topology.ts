@@ -825,6 +825,66 @@ export function buildTemplate(id: TemplateId): Topology {
   }
 }
 
+/* ------------------------------------------------------------------------- */
+/* Persistence (F-130): versioned canvas snapshots for localStorage slots.   */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * What lands in localStorage: the full canvas model (positions included;
+ * the v1 scenario export cannot carry them) plus metadata. The export gate
+ * doubles as the import validator, so a stored canvas that could never run
+ * is rejected before touching the live topology.
+ */
+export interface SavedTopology {
+  version: 1;
+  savedAt: string;
+  topology: Topology;
+}
+
+const SAVED_TOPOLOGY_VERSION = 1;
+
+/** Serialize the canvas for a slot or the autosave entry. */
+export function serializeTopology(topology: Topology): string {
+  const saved: SavedTopology = {
+    version: SAVED_TOPOLOGY_VERSION,
+    savedAt: new Date().toISOString(),
+    topology,
+  };
+  return JSON.stringify(saved);
+}
+
+/** Parse and validate a stored canvas. Throws on garbage or old versions. */
+export function parseSavedTopology(text: string): Topology {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("guardado inválido: no es JSON");
+  }
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("guardado inválido: se esperaba un objeto");
+  }
+  const { version, topology } = raw as {
+    version?: unknown;
+    topology?: unknown;
+  };
+  if (version !== SAVED_TOPOLOGY_VERSION) {
+    throw new Error(
+      `guardado inválido: versión no soportada (${typeof version === "number" || typeof version === "string" ? String(version) : "desconocida"})`,
+    );
+  }
+  if (typeof topology !== "object" || topology === null) {
+    throw new Error("guardado inválido: falta la topología");
+  }
+  const candidate = topology as Topology;
+  if (!Array.isArray(candidate.nodes) || !Array.isArray(candidate.links)) {
+    throw new Error("guardado inválido: faltan los nodos o los cables");
+  }
+  // Reuse the export gate: rejects canvases that could never run.
+  topologyToScenario(candidate);
+  return candidate;
+}
+
 export type DeviceKind = "host" | "switch" | "router" | "hub" | "server";
 
 export const DEVICE_KINDS: ReadonlyArray<DeviceKind> = [
@@ -1673,7 +1733,7 @@ function nodeToScenario(node: TopologyNode, path: string): ScenarioNode {
   if (node.name.trim() === "") {
     throw fail(path, "falta el nombre del dispositivo");
   }
-  if (node.interfaces.length === 0) {
+  if (!Array.isArray(node.interfaces) || node.interfaces.length === 0) {
     throw fail(path, `${node.name} necesita al menos una interfaz`);
   }
   assertUniqueInterfaceNames(node, path);

@@ -33,12 +33,14 @@ import {
   type LinkPresetId,
   NODE_HEIGHT,
   NODE_WIDTH,
+  parseSavedTopology,
   removeInterface,
   removeLink,
   removeNode,
   removeRoute,
   renameInterface,
   renameNode,
+  serializeTopology,
   TEMPLATE_IDS,
   TEMPLATES,
   type TemplateId,
@@ -92,6 +94,12 @@ interface NodeDrag {
   pointerId: number;
 }
 
+/** Mount-time restore: the draft wins over the example, and says so. */
+interface InitialLoad {
+  topology: Topology;
+  restored: boolean;
+}
+
 const MIN_X = 8;
 const MIN_Y = 8;
 const MAX_X = CANVAS_WIDTH - NODE_WIDTH - MIN_X;
@@ -117,7 +125,12 @@ const ALIGN_WHERE: Record<AlignMode, string> = {
   bottom: "abajo",
 };
 
-let topology = $state<Topology>(exampleTopology());
+/** F-130 storage keys: one rolling draft plus named saves. */
+const AUTOSAVE_KEY = "netlab.editor.autosave.v1";
+const SLOTS_KEY = "netlab.editor.slots.v1";
+
+const initial = loadInitialTopology();
+let topology = $state<Topology>(initial.topology);
 let history = $state<TopologyHistory>(createHistory());
 /** True while a drag/key-hold/text session shares one undo step. */
 let coalescing = false;
@@ -144,7 +157,9 @@ let canvasPan = $state<{
 } | null>(null);
 let notice = $state<Notice>({
   kind: "info",
-  text: "Ejemplo cargado: h1 → r1 → h2/h3 con ping. Exportá el JSON y corré netlab run.",
+  text: initial.restored
+    ? "Borrador restaurado desde este navegador."
+    : "Ejemplo cargado: h1 → r1 → h2/h3 con ping. Exportá el JSON y corré netlab run.",
 });
 let filename = $state("mi-topologia");
 let pingDraft = $state({
@@ -160,6 +175,17 @@ let fileInput: HTMLInputElement | null = null;
 
 /** Names waiting to be duplicated again; never the topology nodes themselves. */
 let clipboard = $state<Array<string> | null>(null);
+/** Named saves: name → serialized `SavedTopology` text (F-130 slots). */
+let slots = $state<Record<string, string>>(loadSlots());
+let slotName = $state("");
+
+/**
+ * Autosave (F-130): `serializeTopology` walks the whole model, so this re-runs
+ * on any nested mutation. It records no undo step and calls no notice.
+ */
+$effect(() => {
+  writeLocal(AUTOSAVE_KEY, serializeTopology(topology));
+});
 
 const selectedNode = $derived(selectedNodeOf());
 const selectedLink = $derived(selectedLinkOf());
@@ -196,6 +222,13 @@ const linkRows = $derived.by(() => {
   return rows;
 });
 const pendingAnchor = $derived(pending === null ? null : anchorFor(pending));
+/** Slot rows: name plus the readable timestamp stored inside its text. */
+const slotRows = $derived.by(() =>
+  Object.entries(slots).map(([name, text]) => ({
+    name,
+    when: slotSavedAt(text),
+  })),
+);
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -203,6 +236,46 @@ function clamp(value: number, min: number, max: number): number {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Storage reads never throw: private mode, disabled storage or the static
+ * prerender (no DOM) all read as "nothing stored".
+ */
+function readLocal(key: string): string | null {
+  if (typeof localStorage === "undefined") {
+    return null;
+  }
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** Writes fail silently too: a refused write must never block editing. */
+function writeLocal(key: string, value: string): void {
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Quota exceeded or private mode: drop the write and keep editing.
+  }
+}
+
+/** Restore the autosave draft; a corrupt or old one falls back to the example. */
+function loadInitialTopology(): InitialLoad {
+  const stored = readLocal(AUTOSAVE_KEY);
+  if (stored !== null) {
+    try {
+      return { topology: parseSavedTopology(stored), restored: true };
+    } catch {
+      // Same fallback as a missing draft; the autosave effect overwrites it.
+    }
+  }
+  return { topology: exampleTopology(), restored: false };
 }
 
 function plural(count: number, one: string, many: string): string {
@@ -432,6 +505,98 @@ function loadTemplate(id: TemplateId): void {
   } catch (error) {
     setNotice("error", messageOf(error));
   }
+}
+
+/** Read the named saves; anything malformed degrades to "no saves". */
+function loadSlots(): Record<string, string> {
+  const stored = readLocal(SLOTS_KEY);
+  if (stored === null) {
+    return {};
+  }
+  try {
+    const raw: unknown = JSON.parse(stored);
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return {};
+    }
+    const valid: Record<string, string> = {};
+    for (const [name, value] of Object.entries(raw)) {
+      if (typeof value === "string") {
+        valid[name] = value;
+      }
+    }
+    return valid;
+  } catch {
+    return {};
+  }
+}
+
+/** Replace the slot map and mirror it to storage. */
+function persistSlots(next: Record<string, string>): void {
+  slots = next;
+  writeLocal(SLOTS_KEY, JSON.stringify(next));
+}
+
+/** "2025-06-01T12:34:56.000Z" → "2025-06-01 12:34"; "—" when unreadable. */
+function slotSavedAt(text: string): string {
+  try {
+    const { savedAt } = JSON.parse(text) as { savedAt?: unknown };
+    if (typeof savedAt !== "string" || Number.isNaN(Date.parse(savedAt))) {
+      return "—";
+    }
+    return savedAt.slice(0, 16).replace("T", " ");
+  } catch {
+    return "—";
+  }
+}
+
+function onSaveSlot(): void {
+  const name = slotName.trim();
+  if (name === "") {
+    setNotice("error", "Poné un nombre para guardar la topología.");
+    return;
+  }
+  const existed = slots[name] !== undefined;
+  persistSlots({ ...slots, [name]: serializeTopology(topology) });
+  slotName = "";
+  setNotice(
+    "ok",
+    existed
+      ? `Guardado "${name}" reemplazado en este navegador.`
+      : `Guardado "${name}" en este navegador.`,
+  );
+}
+
+function onLoadSlot(name: string): void {
+  const text = slots[name];
+  if (text === undefined) {
+    setNotice("error", `El guardado "${name}" ya no existe.`);
+    return;
+  }
+  try {
+    loadTopology(parseSavedTopology(text), `Guardado "${name}" cargado.`);
+  } catch (error) {
+    setNotice("error", `No se cargó "${name}": ${messageOf(error)}`);
+  }
+}
+
+function onDeleteSlot(name: string): void {
+  const next = { ...slots };
+  delete next[name];
+  persistSlots(next);
+  setNotice("info", `Guardado "${name}" eliminado.`);
+}
+
+function onSlotNameInput(event: Event): void {
+  const input = event.currentTarget as HTMLInputElement;
+  slotName = input.value;
+}
+
+function onSlotNameKeyDown(event: KeyboardEvent): void {
+  if (event.key !== "Enter") {
+    return;
+  }
+  event.preventDefault();
+  onSaveSlot();
 }
 
 function placeNode(kind: DeviceKind, x: number, y: number): void {
@@ -1386,7 +1551,7 @@ function exportJson(): void {
       )}
     </div>
     <div class="sp"></div>
-    <span class="pill">sin persistencia</span>
+    <span class="pill">autosave local</span>
     <a class="linkbtn" href="/">Workbench</a>
     <button type="button" onclick={loadExample}>Ejemplo</button>
     <button type="button" onclick={openImport}>Importar JSON</button>
@@ -2168,6 +2333,52 @@ function exportJson(): void {
               {/each}
             </span>
           </div>
+
+          <div class="sec">
+            <h3>Guardados · {slotRows.length}</h3>
+          </div>
+          <div class="row slot-new">
+            <label class="fld">
+              <span>nombre</span>
+              <input
+                class="mono"
+                value={slotName}
+                placeholder="nombre del guardado"
+                oninput={onSlotNameInput}
+                onkeydown={onSlotNameKeyDown}
+              />
+            </label>
+            <button type="button" class="mini" onclick={onSaveSlot}>
+              Guardar
+            </button>
+          </div>
+          {#each slotRows as slot (slot.name)}
+            <div class="slot">
+              <span class="mono slot-label" title={slot.name}>{slot.name}</span>
+              <span class="slot-when">{slot.when}</span>
+              <button
+                type="button"
+                class="mini"
+                onclick={() => onLoadSlot(slot.name)}
+              >
+                Cargar
+              </button>
+              <button
+                type="button"
+                class="mini danger-ghost"
+                aria-label={`Borrar guardado ${slot.name}`}
+                title="Borrar guardado"
+                onclick={() => onDeleteSlot(slot.name)}
+              >
+                ✕
+              </button>
+            </div>
+          {/each}
+          <p class="hint">
+            Los guardados viven en este navegador (localStorage). El borrador se
+            autoguarda solo: recargar no pierde trabajo, pero otro equipo no lo ve.
+          </p>
+
           <div class="grid2">
             <label class="fld">
               <span>seed</span>
@@ -2864,6 +3075,39 @@ function exportJson(): void {
 
   .actions li span {
     overflow-wrap: anywhere;
+  }
+
+  /* Named saves (F-130): one compact row per slot. */
+  .slot-new {
+    align-items: flex-end;
+  }
+
+  .slot-new .fld {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .slot {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--line);
+    padding: 4px 6px;
+    font-size: 11.5px;
+  }
+
+  .slot-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .slot-when {
+    color: var(--dim);
+    font-size: 10.5px;
+    white-space: nowrap;
   }
 
   .hint {
