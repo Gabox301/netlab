@@ -1332,12 +1332,31 @@ export function renameInterface(
   };
 }
 
+/**
+ * F-100 fault actions name their target in their own key (`cut`, `restore`,
+ * `restart`, `flushArp`) instead of `host`, so every `host` rule below must
+ * skip them.
+ */
+type FaultAction = Extract<
+  ScenarioAction,
+  | { cut: string }
+  | { restore: string }
+  | { restart: string }
+  | { flushArp: string }
+>;
+
+function isFaultAction(action: ScenarioAction): action is FaultAction {
+  return (
+    "cut" in action ||
+    "restore" in action ||
+    "restart" in action ||
+    "flushArp" in action
+  );
+}
+
 function withActionHost(action: ScenarioAction, host: string): ScenarioAction {
-  if ("exec" in action) {
-    return { ...action, host };
-  }
-  if ("ping" in action) {
-    return { ...action, host };
+  if (isFaultAction(action)) {
+    return action;
   }
   return { ...action, host };
 }
@@ -1891,18 +1910,55 @@ function validateLinkParams(params: LinkParams, path: string): void {
   }
 }
 
+/**
+ * Actions run on L2 endpoints only: a `server` exports as a `host`, so it is a
+ * valid source for both traffic and fault actions.
+ */
+function requireActionHost(
+  nodes: Array<TopologyNode>,
+  name: string,
+  path: string,
+): TopologyNode {
+  const host = nodes.find((node) => node.name === name);
+  if (host === undefined) {
+    throw fail(path, `no existe el dispositivo "${name}"`);
+  }
+  if (host.kind !== "host" && host.kind !== "server") {
+    throw fail(path, `${name} no es un host`);
+  }
+  return host;
+}
+
 function actionToScenario(
   action: ScenarioAction,
   nodes: Array<TopologyNode>,
+  links: Array<TopologyLink>,
   path: string,
 ): ScenarioAction {
-  const host = nodes.find((node) => node.name === action.host);
-  if (host === undefined) {
-    throw fail(`${path}.host`, `no existe el dispositivo "${action.host}"`);
+  // Fault actions (F-100) target a cable id or a device id in their own key;
+  // traffic actions keep requiring `host`.
+  if (isFaultAction(action)) {
+    if ("cut" in action || "restore" in action) {
+      const key = "cut" in action ? "cut" : "restore";
+      const linkId = "cut" in action ? action.cut : action.restore;
+      if (!links.some((link) => link.id === linkId)) {
+        throw fail(`${path}.${key}`, `no existe el cable "${linkId}"`);
+      }
+      return { ...action };
+    }
+    const name = "restart" in action ? action.restart : action.flushArp;
+    const key = "restart" in action ? "restart" : "flushArp";
+    const host = requireActionHost(nodes, name, `${path}.${key}`);
+    if (
+      "flushArp" in action &&
+      action.iface !== undefined &&
+      !host.interfaces.some((iface) => iface.name === action.iface)
+    ) {
+      throw fail(`${path}.iface`, `${name} no tiene "${action.iface}"`);
+    }
+    return { ...action };
   }
-  if (host.kind !== "host") {
-    throw fail(`${path}.host`, `${action.host} no es un host`);
-  }
+  const host = requireActionHost(nodes, action.host, `${path}.host`);
   if ("exec" in action) {
     return { ...action };
   }
@@ -1953,7 +2009,12 @@ export function topologyToScenario(topology: Topology): Scenario {
     return out;
   });
   const actions = topology.actions.map((action, index) =>
-    actionToScenario(action, topology.nodes, `actions[${index}]`),
+    actionToScenario(
+      action,
+      topology.nodes,
+      topology.links,
+      `actions[${index}]`,
+    ),
   );
   const scenario: Scenario = {
     version: SCENARIO_VERSION,
@@ -2348,6 +2409,21 @@ export function exampleTopology(): Topology {
 
 /** One-line label for the action list in the inspector. */
 export function describeAction(action: ScenarioAction): string {
+  // Fault actions (F-100) may arrive from JSON without `host`: read the id
+  // out of the discriminator key instead.
+  if ("cut" in action) {
+    return `cortar cable ${action.cut}`;
+  }
+  if ("restore" in action) {
+    return `restaurar cable ${action.restore}`;
+  }
+  if ("restart" in action) {
+    return `reiniciar ${action.restart}`;
+  }
+  if ("flushArp" in action) {
+    const iface = action.iface === undefined ? "" : ` · ${action.iface}`;
+    return `flush ARP ${action.flushArp}${iface}`;
+  }
   if ("exec" in action) {
     return `${action.host}$ ${action.exec}`;
   }

@@ -11,14 +11,17 @@ import {
   addNode,
   applyLinkPreset,
   canConnect,
+  describeAction,
   emptyTopology,
   exampleTopology,
   LINK_PRESET_IDS,
   LINK_PRESETS,
+  parseSavedTopology,
   removeInterface,
   renameInterface,
   renameNode,
   scenarioToTopology,
+  serializeTopology,
   type Topology,
   topologyFromJson,
   topologyToScenario,
@@ -458,5 +461,121 @@ describe("link presets (F-83)", () => {
         new RegExp(name.replace(/\..*$/, "")),
       );
     }
+  });
+});
+
+describe("fault actions (F-124)", () => {
+  /**
+   * Example lab plus the four F-100 faults. None of them carries `host`: the
+   * CLI names the target in the action's own key (`cut`, `restart`, …).
+   */
+  function withFaults(): Topology {
+    const topology = exampleTopology();
+    topology.actions = [
+      { at: 0, cut: "l1" },
+      { at: "1ms", restore: "l1" },
+      { at: 0, restart: "h1" },
+      { at: 0, flushArp: "h1", iface: "eth0" },
+    ];
+    return topology;
+  }
+
+  test("faults export without a host and pass the CLI gate", () => {
+    const { scenario } = topologyToScenarioJson(withFaults());
+    expect(scenario.actions).toEqual([
+      { at: 0, cut: "l1" },
+      { at: "1ms", restore: "l1" },
+      { at: 0, restart: "h1" },
+      { at: 0, flushArp: "h1", iface: "eth0" },
+    ]);
+    expect(parseScenarioJson(JSON.parse(JSON.stringify(scenario)))).toEqual(
+      scenario,
+    );
+  });
+
+  test("round-trip: export -> import -> export keeps every fault", () => {
+    const { json } = topologyToScenarioJson(withFaults());
+    const reopened = topologyFromJson(json);
+    expect(reopened.topology.actions).toEqual(withFaults().actions);
+    expect(parseScenarioJson(topologyToScenario(reopened.topology))).toEqual(
+      reopened.scenario,
+    );
+  });
+
+  test("imported faults still run in the CLI runner", async () => {
+    const topology = withFaults();
+    // Cut h2's cable only, and schedule the h1 faults after its ping, so the
+    // example traffic keeps flowing while every fault kind runs.
+    topology.actions = [
+      { at: 0, cut: "l2" },
+      { at: "1ms", restore: "l2" },
+      { at: 0, host: "h1", destIp: "10.0.2.2", ping: { count: 1 } },
+      { at: "2ms", restart: "h1" },
+      { at: "3ms", flushArp: "h1", iface: "eth0" },
+    ];
+    const { json } = topologyToScenarioJson(topology);
+    const result = await runScenario(topologyFromJson(json).scenario);
+    expect(result.processed).toBeGreaterThan(0);
+    expect(result.traces.length).toBeGreaterThan(0);
+  });
+
+  test("autosave keeps faults across serialize -> parse", () => {
+    const topology = withFaults();
+    const restored = parseSavedTopology(serializeTopology(topology));
+    expect(restored.actions).toEqual(topology.actions);
+  });
+
+  test("rejects cut/restore on an unknown cable", () => {
+    const topology = exampleTopology();
+    topology.actions = [{ cut: "l9" }];
+    expect(() => topologyToScenario(topology)).toThrow(/l9/);
+    topology.actions = [{ restore: "l9" }];
+    expect(() => topologyToScenario(topology)).toThrow(/l9/);
+  });
+
+  test("rejects restart/flushArp on an unknown device", () => {
+    const topology = exampleTopology();
+    topology.actions = [{ restart: "ghost" }];
+    expect(() => topologyToScenario(topology)).toThrow(/ghost/);
+    topology.actions = [{ flushArp: "ghost" }];
+    expect(() => topologyToScenario(topology)).toThrow(/ghost/);
+  });
+
+  test("rejects flushArp on an interface the device does not have", () => {
+    const topology = exampleTopology();
+    topology.actions = [{ flushArp: "h1", iface: "eth9" }];
+    expect(() => topologyToScenario(topology)).toThrow(/eth9/);
+  });
+
+  test("accepts a server as an action source", () => {
+    const added = addNode(exampleTopology(), "server", 120, 780);
+    const topology = added.topology;
+    topology.actions = [
+      { at: 0, host: added.name, destIp: "10.0.2.2", ping: { count: 1 } },
+      { at: 0, restart: added.name },
+      { at: 0, flushArp: added.name },
+    ];
+    expect(() => topologyToScenarioJson(topology)).not.toThrow();
+  });
+
+  test("describes every fault action without a host field", () => {
+    expect(describeAction({ cut: "l1" })).toBe("cortar cable l1");
+    expect(describeAction({ restore: "l1" })).toBe("restaurar cable l1");
+    expect(describeAction({ restart: "h1" })).toBe("reiniciar h1");
+    expect(describeAction({ flushArp: "h1" })).toBe("flush ARP h1");
+    expect(describeAction({ flushArp: "h1", iface: "eth0" })).toBe(
+      "flush ARP h1 · eth0",
+    );
+  });
+
+  test("rename rewrites the host of traffic actions only", () => {
+    const topology = exampleTopology();
+    topology.actions = [
+      { at: 0, host: "h1", destIp: "10.0.2.2", ping: { count: 1 } },
+      { at: 0, host: "h1", restart: "h1" },
+    ];
+    const renamed = renameNode(topology, "h1", "h9");
+    expect(renamed.actions[0]).toMatchObject({ host: "h9" });
+    expect(renamed.actions[1]).toEqual({ at: 0, host: "h1", restart: "h1" });
   });
 });

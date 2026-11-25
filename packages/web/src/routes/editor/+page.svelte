@@ -1,5 +1,5 @@
 <script lang="ts">
-import type { ScenarioPingAction } from "../../lib/topology";
+import type { ScenarioAction, ScenarioPingAction } from "../../lib/topology";
 import {
   ALIGN_MODES,
   type AlignMode,
@@ -169,6 +169,21 @@ let pingDraft = $state({
   size: "32",
   interval: "1ms",
 });
+/**
+ * F-100 fault drafts. An empty target falls back to the first cable/device, so
+ * the creators stay usable without touching every select. `at` is µs or a
+ * duration string; blank means the schema default (0).
+ */
+let faultDraft = $state({
+  link: "",
+  host: "",
+  iface: "",
+  atCable: "0",
+  atHost: "0",
+});
+
+/** Duration shape accepted by the CLI (`10s`, `100ms`, `500us`, `1.5ms`). */
+const AT_DURATION_RE = /^\d+(?:\.\d+)?\s*(?:us|µs|μs|ms|s|m)?$/i;
 
 let svgEl: SVGSVGElement | null = null;
 let fileInput: HTMLInputElement | null = null;
@@ -201,8 +216,26 @@ const canUndo = $derived(canUndoHistory(history));
 const canRedo = $derived(canRedoHistory(history));
 const canCopy = $derived(selectedNode !== null);
 const canPaste = $derived(clipboard !== null);
-const hostNodes = $derived(
-  topology.nodes.filter((node) => node.kind === "host"),
+/**
+ * Action sources: hosts and servers. Scenario v1 has no `server` type, so a
+ * server exports as a host and the CLI runs its actions unchanged (F-124).
+ */
+const actionHosts = $derived(
+  topology.nodes.filter(
+    (node) => node.kind === "host" || node.kind === "server",
+  ),
+);
+/** Selected cable for a fault, falling back to the first one. */
+const faultLink = $derived(
+  topology.links.some((link) => link.id === faultDraft.link)
+    ? faultDraft.link
+    : (topology.links[0]?.id ?? ""),
+);
+/** Selected device for a fault, falling back to the first host/server. */
+const faultHost = $derived(
+  actionHosts.some((node) => node.name === faultDraft.host)
+    ? faultDraft.host
+    : (actionHosts[0]?.name ?? ""),
 );
 const linkRows = $derived.by(() => {
   const rows: Array<{
@@ -1439,7 +1472,7 @@ function onRemoveAction(index: number): void {
 }
 
 function addPing(): void {
-  if (!hostNodes.some((node) => node.name === pingDraft.host)) {
+  if (!actionHosts.some((node) => node.name === pingDraft.host)) {
     setNotice("error", "Elegí un host para el ping.");
     return;
   }
@@ -1474,6 +1507,102 @@ function openImport(): void {
   fileInput?.click();
 }
 
+function onFaultLinkChange(event: Event): void {
+  const select = event.currentTarget as HTMLSelectElement;
+  faultDraft.link = select.value;
+}
+
+function onFaultHostChange(event: Event): void {
+  const select = event.currentTarget as HTMLSelectElement;
+  faultDraft.host = select.value;
+  faultDraft.iface = "";
+}
+
+/** Fault instant: `undefined` (schema default), µs as a number, or `null` on error. */
+function faultAt(text: string): number | string | undefined | null {
+  const value = text.trim();
+  if (value === "") {
+    return undefined;
+  }
+  if (/^\d+$/.test(value)) {
+    return Number.parseInt(value, 10);
+  }
+  if (AT_DURATION_RE.test(value)) {
+    return value;
+  }
+  setNotice(
+    "error",
+    `Instante inválido "${value}": usá microsegundos o "10ms", "1s".`,
+  );
+  return null;
+}
+
+function withFaultAt(at: number | string | undefined): {
+  at?: number | string;
+} {
+  return at === undefined ? {} : { at };
+}
+
+/** F-100 cut/restore: the action names a cable id, never a host. */
+function addCableFault(kind: "cut" | "restore"): void {
+  const link = faultLink;
+  if (link === "") {
+    setNotice("error", "Conectá dos interfaces para poder cortar un cable.");
+    return;
+  }
+  const at = faultAt(faultDraft.atCable);
+  if (at === null) {
+    return;
+  }
+  const timed = withFaultAt(at);
+  const action: ScenarioAction =
+    kind === "cut" ? { ...timed, cut: link } : { ...timed, restore: link };
+  checkpoint();
+  topology.actions = [...topology.actions, action];
+  setNotice(
+    "ok",
+    `Acción de ${kind === "cut" ? "corte" : "restauración"} sobre ${link} agregada.`,
+  );
+}
+
+/** F-100 restart/flushArp: the action names the device in its own key. */
+function addHostFault(kind: "restart" | "flushArp"): void {
+  const name = faultHost;
+  const host = topology.nodes.find((node) => node.name === name);
+  if (host === undefined) {
+    setNotice("error", "Agregá un host o server para crear fallas de host.");
+    return;
+  }
+  const at = faultAt(faultDraft.atHost);
+  if (at === null) {
+    return;
+  }
+  const timed = withFaultAt(at);
+  if (kind === "restart") {
+    checkpoint();
+    topology.actions = [...topology.actions, { ...timed, restart: name }];
+    setNotice("ok", `Reinicio de ${name} agregado.`);
+    return;
+  }
+  const iface = faultDraft.iface.trim();
+  if (
+    iface !== "" &&
+    !host.interfaces.some((candidate) => candidate.name === iface)
+  ) {
+    setNotice("error", `${name} no tiene la interfaz "${iface}".`);
+    return;
+  }
+  checkpoint();
+  topology.actions = [
+    ...topology.actions,
+    { ...timed, flushArp: name, ...(iface === "" ? {} : { iface }) },
+  ];
+  setNotice(
+    "ok",
+    `Flush ARP de ${name}${iface === "" ? "" : `:${iface}`} agregado.`,
+  );
+}
+
 async function onImportFile(event: Event): Promise<void> {
   const input = event.currentTarget as HTMLInputElement;
   const file = input.files?.[0];
@@ -1502,22 +1631,230 @@ function safeFilename(): string {
   return base === "" ? "netlab-topologia" : base;
 }
 
+/** One download path for JSON, SVG and PNG (same anchor dance as before). */
+function downloadBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  anchor.rel = "noopener";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+/**
+ * F-125 diagram colors. The page styles come from `var(--…)` tokens, which do
+ * not travel inside a downloaded file: the exported SVG carries literals.
+ */
+const SVG_EXPORT_STYLE = `
+.bg{fill:url(#netlab-grid)}
+.gridline{stroke:#1b1b20;stroke-width:1}
+.link{stroke:#80808c;stroke-width:2.5}
+.node{fill:#1b1b20;stroke:#34343c;stroke-width:1.5}
+.nl{fill:#ffffff;font:600 13px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.ns{font:11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.k-host{fill:#b4b4be}
+.k-server{fill:#b4b4be}
+.k-switch{fill:#3dc8ff}
+.k-router{fill:#ff4d3d}
+.k-hub{fill:#ffd23d}
+.port{fill:#1b1b20;stroke:#80808c;stroke-width:1.5}
+.port-core{fill:#80808c}
+`;
+/** Overlays and editing state that must not reach the diagram file. */
+const SVG_DROP_SELECTORS = [".link-hit", ".preview", ".plbl", ".ghost"];
+const SVG_STATE_CLASSES = [
+  "sel",
+  "dragging",
+  "armed",
+  "used",
+  "show",
+  "connecting",
+];
+const SVG_INTERACTION_ATTRS = [
+  "role",
+  "tabindex",
+  "aria-label",
+  "aria-hidden",
+  "aria-pressed",
+  "onpointerdown",
+  "onpointermove",
+  "onkeyup",
+  "onkeydown",
+];
+const SVG_EXPORT_PAD = 28;
+
+/**
+ * F-125: clone the live canvas into a standalone SVG. The viewBox crops to the
+ * devices (plus padding), a literal-color `<style>` replaces the page tokens,
+ * and selection, hit-targets, previews and ARIA are stripped so the result is
+ * a pure diagram that opens in any viewer.
+ */
+function topologyToSvg(canvas: SVGSVGElement): {
+  svg: string;
+  width: number;
+  height: number;
+} {
+  const clone = canvas.cloneNode(true) as SVGSVGElement;
+  for (const selector of SVG_DROP_SELECTORS) {
+    for (const element of clone.querySelectorAll(selector)) {
+      element.remove();
+    }
+  }
+  for (const element of clone.querySelectorAll("[class]")) {
+    for (const name of SVG_STATE_CLASSES) {
+      element.classList.remove(name);
+    }
+  }
+  for (const element of clone.querySelectorAll("*")) {
+    for (const name of SVG_INTERACTION_ATTRS) {
+      element.removeAttribute(name);
+    }
+  }
+  clone.removeAttribute("class");
+  clone.removeAttribute("style");
+  clone.removeAttribute("role");
+  clone.removeAttribute("tabindex");
+  clone.removeAttribute("aria-label");
+
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const rect of clone.querySelectorAll("rect.node")) {
+    const x = Number(rect.getAttribute("x") ?? 0);
+    const y = Number(rect.getAttribute("y") ?? 0);
+    const width = Number(rect.getAttribute("width") ?? 0);
+    const height = Number(rect.getAttribute("height") ?? 0);
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x + width);
+    maxY = Math.max(maxY, y + height);
+  }
+  if (!Number.isFinite(minX)) {
+    // Empty canvas: keep the whole artboard instead of a zero-size viewBox.
+    minX = 0;
+    minY = 0;
+    maxX = CANVAS_WIDTH;
+    maxY = CANVAS_HEIGHT;
+  } else {
+    minX -= SVG_EXPORT_PAD;
+    minY -= SVG_EXPORT_PAD;
+    maxX += SVG_EXPORT_PAD;
+    maxY += SVG_EXPORT_PAD;
+  }
+  const width = Math.max(1, Math.round(maxX - minX));
+  const height = Math.max(1, Math.round(maxY - minY));
+
+  const backdrop = document.createElementNS(SVG_NS, "rect");
+  backdrop.setAttribute("x", String(minX));
+  backdrop.setAttribute("y", String(minY));
+  backdrop.setAttribute("width", String(width));
+  backdrop.setAttribute("height", String(height));
+  backdrop.setAttribute("fill", "#0b0b0d");
+  const defs = clone.querySelector("defs");
+  if (defs === null) {
+    clone.insertBefore(backdrop, clone.firstChild);
+  } else {
+    defs.after(backdrop);
+  }
+
+  const style = document.createElementNS(SVG_NS, "style");
+  style.textContent = SVG_EXPORT_STYLE;
+  clone.insertBefore(style, clone.firstChild);
+
+  clone.setAttribute("xmlns", SVG_NS);
+  clone.setAttribute("viewBox", `${minX} ${minY} ${width} ${height}`);
+  clone.setAttribute("width", String(width));
+  clone.setAttribute("height", String(height));
+  clone.removeAttribute("preserveAspectRatio");
+
+  const body = new XMLSerializer().serializeToString(clone);
+  return {
+    svg: `<?xml version="1.0" encoding="UTF-8"?>\n${body}\n`,
+    width,
+    height,
+  };
+}
+
+function exportSvg(): void {
+  if (svgEl === null) {
+    setNotice("error", "No hay lienzo para exportar.");
+    return;
+  }
+  try {
+    const { svg, width, height } = topologyToSvg(svgEl);
+    const name = `${safeFilename()}.svg`;
+    downloadBlob(new Blob([svg], { type: "image/svg+xml" }), name);
+    setNotice(
+      "ok",
+      `Exportado ${name} · ${width}×${height} · colores literales.`,
+    );
+  } catch (error) {
+    setNotice("error", `No se exportó el SVG: ${messageOf(error)}`);
+  }
+}
+
+/** Rasterize the exported SVG at 2× so the PNG stays crisp on retina screens. */
+function svgToPng(svg: string, width: number, height: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    const image = new Image();
+    image.onload = (): void => {
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(width * 2);
+      canvas.height = Math.round(height * 2);
+      const context = canvas.getContext("2d");
+      if (context === null) {
+        URL.revokeObjectURL(url);
+        reject(new Error("canvas 2D no disponible"));
+        return;
+      }
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      canvas.toBlob((blob) => {
+        if (blob === null) {
+          reject(new Error("toBlob devolvió null"));
+          return;
+        }
+        resolve(blob);
+      }, "image/png");
+    };
+    image.onerror = (): void => {
+      URL.revokeObjectURL(url);
+      reject(new Error("no se pudo rasterizar el SVG"));
+    };
+    image.src = url;
+  });
+}
+
+async function exportPng(): Promise<void> {
+  if (svgEl === null) {
+    setNotice("error", "No hay lienzo para exportar.");
+    return;
+  }
+  try {
+    const { svg, width, height } = topologyToSvg(svgEl);
+    const blob = await svgToPng(svg, width, height);
+    const name = `${safeFilename()}.png`;
+    downloadBlob(blob, name);
+    setNotice("ok", `Exportado ${name} · 2× (${width * 2}×${height * 2}).`);
+  } catch (error) {
+    setNotice("error", `No se exportó el PNG: ${messageOf(error)}`);
+  }
+}
+
 function exportJson(): void {
   try {
     const { json, scenario } = topologyToScenarioJson(topology);
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `${safeFilename()}.json`;
-    anchor.rel = "noopener";
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
+    const name = `${safeFilename()}.json`;
+    downloadBlob(new Blob([json], { type: "application/json" }), name);
     setNotice(
       "ok",
-      `Exportado ${anchor.download} · v${scenario.version} · ${plural(scenario.nodes.length, "nodo", "nodos")}, ${plural(scenario.links.length, "cable", "cables")}, ${plural(scenario.actions.length, "acción", "acciones")} (validado con parseScenarioJson).`,
+      `Exportado ${name} · v${scenario.version} · ${plural(scenario.nodes.length, "nodo", "nodos")}, ${plural(scenario.links.length, "cable", "cables")}, ${plural(scenario.actions.length, "acción", "acciones")} (validado con parseScenarioJson).`,
     );
   } catch (error) {
     setNotice("error", `No se exportó: ${messageOf(error)}`);
@@ -1565,6 +1902,8 @@ function exportJson(): void {
     <button class="primary" type="button" onclick={exportJson}>
       Exportar JSON
     </button>
+    <button type="button" onclick={exportSvg}>SVG</button>
+    <button type="button" onclick={() => void exportPng()}>PNG</button>
   </header>
 
   <main class="stage">
@@ -2434,14 +2773,14 @@ function exportJson(): void {
             </p>
           {/if}
 
-          {#if hostNodes.length > 0}
+          {#if actionHosts.length > 0}
             <fieldset class="iface">
               <legend>Agregar ping</legend>
               <div class="grid2">
                 <label class="fld">
                   <span>host</span>
                   <select bind:value={pingDraft.host}>
-                    {#each hostNodes as host (host.name)}
+                    {#each actionHosts as host (host.name)}
                       <option value={host.name}>{host.name}</option>
                     {/each}
                   </select>
@@ -2477,6 +2816,84 @@ function exportJson(): void {
             <p class="hint">
               Agregá un host para poder crear acciones de ping.
             </p>
+          {/if}
+
+          {#if topology.links.length > 0}
+            <fieldset class="iface">
+              <legend>Agregar falla de cable</legend>
+              <div class="grid2">
+                <label class="fld">
+                  <span>cable</span>
+                  <select value={faultLink} onchange={onFaultLinkChange}>
+                    {#each topology.links as link (link.id)}
+                      <option value={link.id}>
+                        {link.id} · {link.a.node}↔{link.b.node}
+                      </option>
+                    {/each}
+                  </select>
+                </label>
+                <label class="fld">
+                  <span>at (µs)</span>
+                  <input class="mono" bind:value={faultDraft.atCable} />
+                </label>
+              </div>
+              <div class="row">
+                <button
+                  type="button"
+                  class="mini"
+                  onclick={() => addCableFault("cut")}>+ cortar</button
+                >
+                <button
+                  type="button"
+                  class="mini"
+                  onclick={() => addCableFault("restore")}>+ restaurar</button
+                >
+              </div>
+            </fieldset>
+          {:else}
+            <p class="hint">
+              Conectá dos interfaces para poder cortar un cable.
+            </p>
+          {/if}
+
+          {#if actionHosts.length > 0}
+            <fieldset class="iface">
+              <legend>Agregar falla de host</legend>
+              <div class="grid2">
+                <label class="fld">
+                  <span>dispositivo</span>
+                  <select value={faultHost} onchange={onFaultHostChange}>
+                    {#each actionHosts as host (host.name)}
+                      <option value={host.name}>{host.name}</option>
+                    {/each}
+                  </select>
+                </label>
+                <label class="fld">
+                  <span>at (µs)</span>
+                  <input class="mono" bind:value={faultDraft.atHost} />
+                </label>
+              </div>
+              <label class="fld">
+                <span>interfaz (opcional, flush ARP)</span>
+                <input
+                  class="mono"
+                  bind:value={faultDraft.iface}
+                  placeholder="eth0"
+                />
+              </label>
+              <div class="row">
+                <button
+                  type="button"
+                  class="mini"
+                  onclick={() => addHostFault("restart")}>+ reiniciar</button
+                >
+                <button
+                  type="button"
+                  class="mini"
+                  onclick={() => addHostFault("flushArp")}>+ flush ARP</button
+                >
+              </div>
+            </fieldset>
           {/if}
 
           <button type="button" class="primary wide" onclick={exportJson}>
