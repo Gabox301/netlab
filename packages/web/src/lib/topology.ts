@@ -248,6 +248,95 @@ export function canRedoHistory(history: TopologyHistory): boolean {
   return history.future.length > 0;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Duplicate (F-84): copy/paste nodes with their internal cables.            */
+/* ------------------------------------------------------------------------- */
+
+export interface DuplicateResult {
+  topology: Topology;
+  /** Fresh names, in the order requested. */
+  names: Array<string>;
+  /** Fresh cable ids for the kept internal cables. */
+  linkIds: Array<string>;
+}
+
+/**
+ * Duplicate nodes by name, with their internal cables.
+ *
+ * Fresh names come from `addNode` (never collides) and fresh MACs from
+ * `nextMac` over the live set (never reused); positions shift by (dx, dy).
+ * Only cables with both endpoints inside the duplicated set are kept, with
+ * endpoints remapped and params cloned. Everything else — IPs, routes,
+ * VLANs, impairments — travels verbatim, including duplicates.
+ */
+export function duplicateNodes(
+  topology: Topology,
+  names: Array<string>,
+  dx = 32,
+  dy = 32,
+): DuplicateResult {
+  let current = topology;
+  const nameMap = new Map<string, string>();
+  const freshNames: Array<string> = [];
+  for (const name of names) {
+    const src = current.nodes.find((node) => node.name === name);
+    if (src === undefined) {
+      throw new Error(`no existe el dispositivo "${name}"`);
+    }
+    const placed = addNode(current, src.kind, src.x + dx, src.y + dy);
+    current = placed.topology;
+    const macs = allMacs(current);
+    const clone: TopologyNode = structuredClone(src);
+    clone.name = placed.name;
+    const at = current.nodes.find((node) => node.name === placed.name);
+    clone.x = at?.x ?? src.x + dx;
+    clone.y = at?.y ?? src.y + dy;
+    for (const iface of clone.interfaces) {
+      const mac = nextMac(macs);
+      macs.add(mac);
+      iface.mac = mac;
+    }
+    current = {
+      ...current,
+      nodes: current.nodes.map((node) =>
+        node.name === placed.name ? clone : node,
+      ),
+    };
+    nameMap.set(name, placed.name);
+    freshNames.push(placed.name);
+  }
+  const wanted = new Set(names);
+  const linkIds: Array<string> = [];
+  for (const src of topology.links) {
+    if (!wanted.has(src.a.node) || !wanted.has(src.b.node)) {
+      continue;
+    }
+    const a = nameMap.get(src.a.node);
+    const b = nameMap.get(src.b.node);
+    if (a === undefined || b === undefined) {
+      continue;
+    }
+    const added = addLink(
+      current,
+      { node: a, iface: src.a.iface },
+      { node: b, iface: src.b.iface },
+    );
+    current = added.topology;
+    const params: LinkParams = { ...src.params };
+    if (src.params.burst !== undefined) {
+      params.burst = { ...src.params.burst };
+    }
+    current = {
+      ...current,
+      links: current.links.map((link) =>
+        link.id === added.id ? { ...link, params } : link,
+      ),
+    };
+    linkIds.push(added.id);
+  }
+  return { topology: current, names: freshNames, linkIds };
+}
+
 export type DeviceKind = "host" | "switch" | "router" | "hub";
 
 export const DEVICE_KINDS: ReadonlyArray<DeviceKind> = [

@@ -16,6 +16,7 @@ import {
   DEVICE_KINDS,
   type DeviceKind,
   describeAction,
+  duplicateNodes,
   exampleTopology,
   historyPush,
   historyRedo,
@@ -107,10 +108,15 @@ let pingDraft = $state({
 let svgEl: SVGSVGElement | null = null;
 let fileInput: HTMLInputElement | null = null;
 
+/** Names waiting to be duplicated again; never the topology nodes themselves. */
+let clipboard = $state<Array<string> | null>(null);
+
 const selectedNode = $derived(selectedNodeOf());
 const selectedLink = $derived(selectedLinkOf());
 const canUndo = $derived(canUndoHistory(history));
 const canRedo = $derived(canRedoHistory(history));
+const canCopy = $derived(selectedNode !== null);
+const canPaste = $derived(clipboard !== null);
 const hostNodes = $derived(
   topology.nodes.filter((node) => node.kind === "host"),
 );
@@ -202,6 +208,58 @@ function onRedo(): void {
   }
   history = redone.history;
   applyHistoryStep(redone.snapshot, "Rehecho.");
+}
+
+function onCopySelected(): void {
+  const node = selectedNode;
+  if (node === null) {
+    setNotice("info", "Elegí un dispositivo en el lienzo para copiarlo.");
+    return;
+  }
+  // Copying never mutates the topology, so it records no undo step.
+  clipboard = [node.name];
+  setNotice("ok", `${node.name} copiado: Ctrl+V lo pega duplicado.`);
+}
+
+function onPasteClipboard(): void {
+  const names = clipboard;
+  if (names === null) {
+    setNotice("info", "Nada copiado todavía: elegí un dispositivo y Ctrl+C.");
+    return;
+  }
+  try {
+    const pasted = duplicateNodes(topology, names);
+    checkpoint();
+    topology = pasted.topology;
+    // Duplicates land at src + 32; pull back anything the canvas edge clips.
+    for (const name of pasted.names) {
+      const node = topology.nodes.find((candidate) => candidate.name === name);
+      if (node === undefined) {
+        continue;
+      }
+      node.x = clamp(node.x, MIN_X, MAX_X);
+      node.y = clamp(node.y, MIN_Y, MAX_Y);
+    }
+    // Cascade: the next paste starts from the fresh duplicates.
+    clipboard = pasted.names;
+    const first = pasted.names[0];
+    if (first !== undefined) {
+      selection = { kind: "node", name: first };
+    }
+    const devices = plural(
+      pasted.names.length,
+      "dispositivo pegado",
+      "dispositivos pegados",
+    );
+    const cables =
+      pasted.linkIds.length === 0
+        ? ""
+        : ` con ${plural(pasted.linkIds.length, "cable interno", "cables internos")}`;
+    setNotice("ok", `${devices}${cables}.`);
+  } catch (error) {
+    // A source deleted by undo/import makes duplicateNodes throw.
+    setNotice("error", messageOf(error));
+  }
 }
 
 function endpointLabel(endpoint: TopologyEndpoint): string {
@@ -608,6 +666,33 @@ function onWindowKeyDown(event: KeyboardEvent): void {
     }
     event.preventDefault();
     onRedo();
+    return;
+  }
+  if (mod && (event.key === "c" || event.key === "C")) {
+    // Inside a field Ctrl+C belongs to the native text clipboard.
+    const target = event.target;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement
+    ) {
+      return;
+    }
+    event.preventDefault();
+    onCopySelected();
+    return;
+  }
+  if (mod && (event.key === "v" || event.key === "V")) {
+    const target = event.target;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement
+    ) {
+      return;
+    }
+    event.preventDefault();
+    onPasteClipboard();
     return;
   }
   if (event.key !== "Escape") {
@@ -1292,6 +1377,26 @@ function exportJson(): void {
         onclick={onRedo}
       >
         <span class="glyph" aria-hidden="true">↪</span><small>redo</small>
+      </button>
+      <button
+        type="button"
+        class="tool"
+        title="Copiar dispositivo (Ctrl+C)"
+        aria-label="Copiar dispositivo"
+        disabled={!canCopy}
+        onclick={onCopySelected}
+      >
+        <span class="glyph" aria-hidden="true">⧉</span><small>copy</small>
+      </button>
+      <button
+        type="button"
+        class="tool"
+        title="Pegar (Ctrl+V)"
+        aria-label="Pegar"
+        disabled={!canPaste}
+        onclick={onPasteClipboard}
+      >
+        <span class="glyph" aria-hidden="true">❐</span><small>paste</small>
       </button>
     </nav>
 
