@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "id": "ip-subnetting-basic",
+  "title": "Subnetting básico en una /26",
+  "kind": "configurar",
+  "objective": "h1 está en 10.0.0.10/26 y h2 en 10.0.0.70/26: son dos subredes /26 distintas del mismo cable y nadie tiene gateway. Mové h2 a una dirección libre de la subred de h1 (10.0.0.0/26) y verificá el ping.",
+  "seed": 1005,
+  "until": "3s",
+  "base": {
+    "version": 1,
+    "seed": 1005,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.10",
+            "mask": "255.255.255.192"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.0.70",
+            "mask": "255.255.255.192"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw1",
+        "ports": [
+          {
+            "name": "p1"
+          },
+          {
+            "name": "p2"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p2"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": []
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "10.0.0.0/26 va de .0 a .63; 10.0.0.64/26 va de .64 a .127. Con /26, .10 y .70 no son vecinos.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "Dejá h1 en .10/26 y elegí para h2 una dirección entre .1 y .62, por ejemplo .40/26.",
+      "penalty": 15
+    }
+  ],
+  "checks": [
+    {
+      "type": "ping",
+      "name": "h1 reaches h2 inside the /26",
+      "from": "h1",
+      "to": "h2",
+      "minReplies": 1
+    },
+    {
+      "type": "macTable",
+      "name": "sw1 learns h2 on p2",
+      "switch": "sw1",
+      "mac": "02:00:00:00:00:0b",
+      "port": "p2"
+    }
+  ]
+}

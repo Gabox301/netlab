@@ -1,0 +1,160 @@
+{
+  "version": 1,
+  "id": "icmp-traceroute",
+  "title": "Traceroute a mano",
+  "kind": "diagnosticar",
+  "objective": "h1 no alcanza 10.0.2.2 porque r1 no tiene ruta hacia esa red y r2 no tiene el regreso completo. Reparé el ruteo y verificá que traceroute muestre los tres saltos: r1, r2 y h2.",
+  "seed": 1015,
+  "until": "40s",
+  "base": {
+    "version": 1,
+    "seed": 1015,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.0.0.1"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.2.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.0.2.1"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r1",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:01",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:02",
+            "ip": "10.0.1.1",
+            "mask": "255.255.255.252"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r2",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:03",
+            "ip": "10.0.1.2",
+            "mask": "255.255.255.252"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:04",
+            "ip": "10.0.2.1",
+            "mask": "255.255.255.0"
+          }
+        ],
+        "routes": [
+          {
+            "destination": "10.0.0.0/24",
+            "gateway": "10.0.1.1",
+            "iface": "p0"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "r1",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "r1",
+          "iface": "p1"
+        },
+        "b": {
+          "node": "r2",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l3",
+        "a": {
+          "node": "r2",
+          "iface": "p1"
+        },
+        "b": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": []
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "traceroute muestra el primer salto y después Network unreachable: el paquete muere en r1.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "Agregá en r1 10.0.2.0/24 por p1 con gateway 10.0.1.2; el regreso de r2 ya existe.",
+      "penalty": 15
+    }
+  ],
+  "checks": [
+    {
+      "type": "exec",
+      "name": "traceroute lists the path and the destination",
+      "host": "h1",
+      "command": "traceroute 10.0.2.2",
+      "expect": {
+        "stdoutMatches": "1  10\\.0\\.0\\.1[\\s\\S]*3  10\\.0\\.2\\.2"
+      }
+    },
+    {
+      "type": "route",
+      "name": "r1 routes 10.0.2.0/24 through r2",
+      "router": "r1",
+      "destination": "10.0.2.0/24",
+      "gateway": "10.0.1.2",
+      "iface": "p1"
+    }
+  ]
+}

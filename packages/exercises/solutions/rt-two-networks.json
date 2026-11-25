@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "seed": 1010,
+  "nodes": [
+    {
+      "type": "host",
+      "id": "h1",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "mac": "02:00:00:00:00:0a",
+          "ip": "10.0.0.2",
+          "mask": "255.255.255.0",
+          "gateway": "10.0.0.1"
+        }
+      ]
+    },
+    {
+      "type": "host",
+      "id": "h2",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "mac": "02:00:00:00:00:0b",
+          "ip": "10.0.1.2",
+          "mask": "255.255.255.0",
+          "gateway": "10.0.1.1"
+        }
+      ]
+    },
+    {
+      "type": "router",
+      "id": "r1",
+      "interfaces": [
+        {
+          "name": "p0",
+          "mac": "02:00:00:00:00:01",
+          "ip": "10.0.0.1",
+          "mask": "255.255.255.0"
+        },
+        {
+          "name": "p1",
+          "mac": "02:00:00:00:00:02",
+          "ip": "10.0.1.1",
+          "mask": "255.255.255.0"
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "a": {
+        "node": "h1",
+        "iface": "eth0"
+      },
+      "b": {
+        "node": "r1",
+        "iface": "p0"
+      },
+      "params": {
+        "latencyUs": 10
+      }
+    },
+    {
+      "id": "l2",
+      "a": {
+        "node": "h2",
+        "iface": "eth0"
+      },
+      "b": {
+        "node": "r1",
+        "iface": "p1"
+      },
+      "params": {
+        "latencyUs": 10
+      }
+    }
+  ],
+  "actions": []
+}

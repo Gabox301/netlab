@@ -1,0 +1,143 @@
+{
+  "version": 1,
+  "id": "ip-duplicate",
+  "title": "IP duplicada",
+  "kind": "diagnosticar",
+  "objective": "h1 y h2 comparten 10.0.0.2: h3 recibe respuestas de una MAC distinta según el último ARP. Reasigná h2 una dirección libre y comprobá que 10.0.0.2 queda para h1.",
+  "seed": 1008,
+  "until": "3s",
+  "base": {
+    "version": 1,
+    "seed": 1008,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h3",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0c",
+            "ip": "10.0.0.3",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw1",
+        "ports": [
+          {
+            "name": "p1"
+          },
+          {
+            "name": "p2"
+          },
+          {
+            "name": "p3"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p2"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l3",
+        "a": {
+          "node": "h3",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p3"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": [
+      {
+        "at": 0,
+        "host": "h3",
+        "exec": "ping -c 1 10.0.0.2"
+      },
+      {
+        "at": "500ms",
+        "host": "h2",
+        "exec": "help"
+      }
+    ]
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "El ping responde, pero no siempre desde la misma MAC: mirá arp -a en h3 después del ping.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "Cambiá solo la IP de h2 a 10.0.0.4/24; 10.0.0.2 debe seguir siendo h1.",
+      "penalty": 15
+    }
+  ],
+  "checks": [
+    {
+      "type": "arp",
+      "name": "10.0.0.2 belongs to h1",
+      "host": "h3",
+      "ip": "10.0.0.2",
+      "mac": "02:00:00:00:00:0a"
+    }
+  ]
+}

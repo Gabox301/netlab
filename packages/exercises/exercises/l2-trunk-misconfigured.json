@@ -1,0 +1,154 @@
+{
+  "version": 1,
+  "id": "l2-trunk-misconfigured",
+  "title": "Trunk mal configurado",
+  "kind": "diagnosticar",
+  "objective": "Dos switches unidos por un trunk: h1 en sw1 y h2 en sw2 están en la VLAN 10, pero el trunk de sw2 no la transporta y además usa la VLAN nativa equivocada. Corregí el trunk y verificá la conectividad.",
+  "seed": 1003,
+  "until": "3s",
+  "base": {
+    "version": 1,
+    "seed": 1003,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw1",
+        "ports": [
+          {
+            "name": "p1",
+            "vlan": {
+              "mode": "access",
+              "vlan": 10
+            }
+          },
+          {
+            "name": "p2",
+            "vlan": {
+              "mode": "trunk",
+              "allowed": [10, 20],
+              "native": 10
+            }
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw2",
+        "ports": [
+          {
+            "name": "p1",
+            "vlan": {
+              "mode": "access",
+              "vlan": 10
+            }
+          },
+          {
+            "name": "p2",
+            "vlan": {
+              "mode": "trunk",
+              "allowed": [20],
+              "native": 20
+            }
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "sw1",
+          "iface": "p2"
+        },
+        "b": {
+          "node": "sw2",
+          "iface": "p2"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l3",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw2",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": []
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "El trunk de sw2 solo permite la VLAN 20 y clasifica lo que llega sin tag como VLAN 20.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "En sw2 p2 usá allowed [10, 20] y native 10, igual que el extremo de sw1.",
+      "penalty": 15
+    }
+  ],
+  "checks": [
+    {
+      "type": "ping",
+      "name": "h1 reaches h2 across the trunk",
+      "from": "h1",
+      "to": "h2",
+      "minReplies": 1
+    },
+    {
+      "type": "macTable",
+      "name": "sw2 learns h2 on its access port",
+      "switch": "sw2",
+      "mac": "02:00:00:00:00:0b",
+      "port": "p1"
+    }
+  ]
+}

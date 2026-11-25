@@ -1,0 +1,210 @@
+{
+  "version": 1,
+  "id": "rt-specific-route",
+  "title": "La ruta más específica gana",
+  "kind": "diagnosticar",
+  "objective": "r1 tiene 10.2.0.0/16 por r3, pero h2 está en la /24 de r2. Agregá la ruta /24 por r2 y comprobá que el tráfico toma el camino correcto.",
+  "seed": 1013,
+  "until": "5s",
+  "base": {
+    "version": 1,
+    "seed": 1013,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.0.0.1"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.2.0.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.2.0.1"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r1",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:01",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:02",
+            "ip": "10.1.1.1",
+            "mask": "255.255.255.252"
+          },
+          {
+            "name": "p2",
+            "mac": "02:00:00:00:00:03",
+            "ip": "10.1.2.1",
+            "mask": "255.255.255.252"
+          }
+        ],
+        "routes": [
+          {
+            "destination": "10.2.0.0/16",
+            "gateway": "10.1.2.2",
+            "iface": "p2"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r2",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:04",
+            "ip": "10.1.1.2",
+            "mask": "255.255.255.252"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:05",
+            "ip": "10.2.0.1",
+            "mask": "255.255.255.0"
+          }
+        ],
+        "routes": [
+          {
+            "destination": "10.0.0.0/24",
+            "gateway": "10.1.1.1",
+            "iface": "p0"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r3",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:06",
+            "ip": "10.1.2.2",
+            "mask": "255.255.255.252"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:07",
+            "ip": "10.2.0.3",
+            "mask": "255.255.255.0"
+          }
+        ],
+        "routes": [
+          {
+            "destination": "10.0.0.0/24",
+            "gateway": "10.1.2.1",
+            "iface": "p0"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "r1",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "r1",
+          "iface": "p1"
+        },
+        "b": {
+          "node": "r2",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l3",
+        "a": {
+          "node": "r1",
+          "iface": "p2"
+        },
+        "b": {
+          "node": "r3",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l4",
+        "a": {
+          "node": "r2",
+          "iface": "p1"
+        },
+        "b": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": []
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "La /16 manda todo 10.2.x.x por r3, pero h2 está detrás de r2. El prefijo más largo gana antes que la métrica.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "Agregá en r1 10.2.0.0/24 por p1 con gateway 10.1.1.2.",
+      "penalty": 15
+    }
+  ],
+  "checks": [
+    {
+      "type": "route",
+      "name": "r1 prefers the /24 through r2",
+      "router": "r1",
+      "destination": "10.2.0.0/24",
+      "gateway": "10.1.1.2",
+      "iface": "p1"
+    },
+    {
+      "type": "ping",
+      "name": "h1 reaches h2 through r2",
+      "from": "h1",
+      "to": "h2",
+      "minReplies": 1
+    }
+  ]
+}

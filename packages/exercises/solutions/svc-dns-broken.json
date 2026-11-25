@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "seed": 1023,
+  "nodes": [
+    {
+      "type": "host",
+      "id": "h1",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "mac": "02:00:00:00:00:0a",
+          "ip": "10.0.0.2",
+          "mask": "255.255.255.0",
+          "gateway": "10.0.0.1"
+        }
+      ]
+    },
+    {
+      "type": "host",
+      "id": "h2",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "mac": "02:00:00:00:00:0b",
+          "ip": "10.0.0.3",
+          "mask": "255.255.255.0"
+        }
+      ]
+    },
+    {
+      "type": "switch",
+      "id": "sw1",
+      "ports": [
+        {
+          "name": "p1"
+        },
+        {
+          "name": "p2"
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "a": {
+        "node": "h1",
+        "iface": "eth0"
+      },
+      "b": {
+        "node": "sw1",
+        "iface": "p1"
+      },
+      "params": {
+        "latencyUs": 10
+      }
+    },
+    {
+      "id": "l2",
+      "a": {
+        "node": "h2",
+        "iface": "eth0"
+      },
+      "b": {
+        "node": "sw1",
+        "iface": "p2"
+      },
+      "params": {
+        "latencyUs": 10
+      }
+    }
+  ],
+  "actions": [
+    {
+      "at": 0,
+      "host": "h2",
+      "exec": "http-server"
+    },
+    {
+      "at": 0,
+      "host": "h1",
+      "exec": "dig @10.0.0.3 web.lab"
+    },
+    {
+      "at": "4s",
+      "host": "h1",
+      "exec": "help"
+    }
+  ]
+}

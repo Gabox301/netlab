@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "id": "tcp-retransmission",
+  "title": "Retransmisión con pérdida",
+  "kind": "analizar",
+  "objective": "El enlace de h1 pierde el 10% de los frames y aun así la sesión TCP con h2 se establece: TCP retransmite. Observá la conexión y comprobá que hubo pérdidas reales en las trazas.",
+  "seed": 2,
+  "until": "4s",
+  "base": {
+    "version": 1,
+    "seed": 2,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw1",
+        "ports": [{ "name": "p1" }, { "name": "p2" }]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": { "node": "h1", "iface": "eth0" },
+        "b": { "node": "sw1", "iface": "p1" },
+        "params": { "latencyUs": 10, "lossRate": 0.1 }
+      },
+      {
+        "id": "l2",
+        "a": { "node": "h2", "iface": "eth0" },
+        "b": { "node": "sw1", "iface": "p2" },
+        "params": { "latencyUs": 10 }
+      }
+    ],
+    "actions": [{ "at": 0, "host": "h2", "exec": "http-server" }]
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "La pérdida no es un fallo de ruteo: el enlace l1 la introduce de forma determinista con la semilla fija.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "nc debe terminar en ESTABLISHED; el check de traza exige al menos un frame_drop con reason loss.",
+      "penalty": 15
+    }
+  ],
+  "checks": [
+    {
+      "type": "exec",
+      "name": "TCP completes despite loss",
+      "host": "h1",
+      "command": "nc 10.0.0.2 80",
+      "expect": { "stdoutMatches": "state ESTABLISHED" }
+    },
+    {
+      "type": "trace",
+      "name": "the lossy link really dropped frames",
+      "kind": "frame_drop",
+      "reason": "loss",
+      "minCount": 1
+    }
+  ]
+}

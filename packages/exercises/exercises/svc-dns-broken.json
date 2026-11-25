@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "id": "svc-dns-broken",
+  "title": "DNS roto, servicio vivo",
+  "kind": "diagnosticar",
+  "objective": "h1 tiene gateway 10.0.0.1 pero no hay resolver DNS: dig consulta a 10.0.0.3:53 y agota los intentos. El servidor HTTP de 10.0.0.3 sí responde. Diagnosticá el timeout y llegá al servicio usando la IP literal.",
+  "seed": 1023,
+  "until": "6s",
+  "base": {
+    "version": 1,
+    "seed": 1023,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.0.0.1"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.0.3",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw1",
+        "ports": [
+          {
+            "name": "p1"
+          },
+          {
+            "name": "p2"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p2"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": [
+      {
+        "at": 0,
+        "host": "h1",
+        "exec": "dig @10.0.0.3 web.lab"
+      },
+      {
+        "at": "4s",
+        "host": "h1",
+        "exec": "help"
+      }
+    ]
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "status: TIMEOUT en dig significa que nadie contesta en el puerto 53; no prueba que el host 10.0.0.3 esté caído.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "Levantá http-server en h2 y usá curl http://10.0.0.3/ (la IP literal): la conectividad IP no depende del nombre.",
+      "penalty": 15
+    }
+  ],
+  "checks": [
+    {
+      "type": "exec",
+      "name": "the service answers on the literal address",
+      "host": "h1",
+      "command": "curl http://10.0.0.3/",
+      "expect": {
+        "stdoutMatches": "netlab"
+      }
+    }
+  ]
+}

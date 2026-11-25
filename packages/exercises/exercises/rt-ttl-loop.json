@@ -1,0 +1,204 @@
+{
+  "version": 1,
+  "id": "rt-ttl-loop",
+  "title": "Bucle de ruteo con TTL",
+  "kind": "diagnosticar",
+  "objective": "r1 y r2 se apuntan mutuamente con sus rutas por defecto; el tráfico hacia 10.0.3.0/24 gira hasta que el TTL llega a cero. Encontrá el bucle y agregá en r2 la ruta específica hacia r3.",
+  "seed": 1012,
+  "until": "6s",
+  "base": {
+    "version": 1,
+    "seed": 1012,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.0.0.1"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.3.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.0.3.1"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r1",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:01",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:02",
+            "ip": "10.0.1.1",
+            "mask": "255.255.255.252"
+          }
+        ],
+        "routes": [
+          {
+            "destination": "0.0.0.0/0",
+            "gateway": "10.0.1.2",
+            "iface": "p1"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r2",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:03",
+            "ip": "10.0.1.2",
+            "mask": "255.255.255.252"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:04",
+            "ip": "10.0.2.1",
+            "mask": "255.255.255.252"
+          }
+        ],
+        "routes": [
+          {
+            "destination": "0.0.0.0/0",
+            "gateway": "10.0.1.1",
+            "iface": "p0"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r3",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:05",
+            "ip": "10.0.2.2",
+            "mask": "255.255.255.252"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:06",
+            "ip": "10.0.3.1",
+            "mask": "255.255.255.0"
+          }
+        ],
+        "routes": [
+          {
+            "destination": "10.0.0.0/24",
+            "gateway": "10.0.2.1",
+            "iface": "p0"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "r1",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "r1",
+          "iface": "p1"
+        },
+        "b": {
+          "node": "r2",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l3",
+        "a": {
+          "node": "r2",
+          "iface": "p1"
+        },
+        "b": {
+          "node": "r3",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l4",
+        "a": {
+          "node": "r3",
+          "iface": "p1"
+        },
+        "b": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": []
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "El ping responde Time to live exceeded desde r2: el paquete no está llegando a r3.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "En r2 agregá 10.0.3.0/24 por p1 con gateway 10.0.2.2; la ruta específica gana sobre la default.",
+      "penalty": 15
+    }
+  ],
+  "checks": [
+    {
+      "type": "ping",
+      "name": "h1 reaches h2 without looping",
+      "from": "h1",
+      "to": "h2",
+      "minReplies": 1
+    },
+    {
+      "type": "route",
+      "name": "r2 routes 10.0.3.0/24 through r3",
+      "router": "r2",
+      "destination": "10.0.3.0/24",
+      "gateway": "10.0.2.2",
+      "iface": "p1"
+    }
+  ]
+}

@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "id": "tcp-closed-port",
+  "title": "Puerto cerrado",
+  "kind": "analizar",
+  "objective": "h2 escucha HTTP en el puerto 80. Distinguí el puerto abierto (handshake completo) del cerrado (RST inmediato) probando el 80 y el 81 con nc.",
+  "seed": 1022,
+  "until": "4s",
+  "base": {
+    "version": 1,
+    "seed": 1022,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw1",
+        "ports": [
+          {
+            "name": "p1"
+          },
+          {
+            "name": "p2"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p2"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": [
+      {
+        "at": 0,
+        "host": "h2",
+        "exec": "http-server"
+      }
+    ]
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "Un puerto sin listener contesta el SYN con RST; nc lo reporta como connect: refused y el estado queda CLOSED.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "El 80 tiene el servidor HTTP; el 81 no. Compará los dos transcripts de nc.",
+      "penalty": 10
+    }
+  ],
+  "checks": [
+    {
+      "type": "exec",
+      "name": "port 81 refuses the connection",
+      "host": "h1",
+      "command": "nc 10.0.0.2 81",
+      "expect": {
+        "stdoutMatches": "connect: refused"
+      }
+    }
+  ]
+}

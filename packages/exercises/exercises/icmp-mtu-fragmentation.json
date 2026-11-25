@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "id": "icmp-mtu-fragmentation",
+  "title": "MTU y fragmentación",
+  "kind": "diagnosticar",
+  "objective": "El enlace entre r1 y r2 acepta frames de hasta 600 bytes, pero los routers los reenvían de 1500 y el ping de 1000 bytes se pierde. Ajustá el MTU de los puertos de tránsito para que el datagrama se fragmente y h2 lo reensamble.",
+  "seed": 1016,
+  "until": "5s",
+  "base": {
+    "version": 1,
+    "seed": 1016,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.0.0.1"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.2.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.0.2.1"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r1",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:01",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:02",
+            "ip": "10.0.1.1",
+            "mask": "255.255.255.252"
+          }
+        ],
+        "routes": [
+          {
+            "destination": "10.0.2.0/24",
+            "gateway": "10.0.1.2",
+            "iface": "p1"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r2",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:03",
+            "ip": "10.0.1.2",
+            "mask": "255.255.255.252"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:04",
+            "ip": "10.0.2.1",
+            "mask": "255.255.255.0"
+          }
+        ],
+        "routes": [
+          {
+            "destination": "10.0.0.0/24",
+            "gateway": "10.0.1.1",
+            "iface": "p0"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "r1",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "r1",
+          "iface": "p1"
+        },
+        "b": {
+          "node": "r2",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10,
+          "mtuBytes": 600
+        }
+      },
+      {
+        "id": "l3",
+        "a": {
+          "node": "r2",
+          "iface": "p1"
+        },
+        "b": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": []
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "El ping grande no llega: mirá si hay drops mtu_exceeded en el enlace r1-r2.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "Bajá el MTU de r1:p1 y r2:p0 a 500 para que fragmenten a un tamaño que el enlace de 600 bytes acepte.",
+      "penalty": 20
+    }
+  ],
+  "checks": [
+    {
+      "type": "exec",
+      "name": "a 1000-byte ping is fragmented and reassembled",
+      "host": "h1",
+      "command": "ping -c 1 -s 1000 10.0.2.2",
+      "expect": {
+        "stdoutMatches": "1 packets transmitted, 1 received"
+      }
+    },
+    {
+      "type": "trace",
+      "name": "no frame is dropped for exceeding the link MTU",
+      "kind": "frame_drop",
+      "reason": "mtu_exceeded",
+      "minCount": 0,
+      "maxCount": 0
+    },
+    {
+      "type": "route",
+      "name": "r1 still routes 10.0.2.0/24 through r2",
+      "router": "r1",
+      "destination": "10.0.2.0/24",
+      "gateway": "10.0.1.2",
+      "iface": "p1"
+    }
+  ]
+}

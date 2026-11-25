@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "id": "svc-http-port",
+  "title": "HTTP en un puerto no estándar",
+  "kind": "diagnosticar",
+  "objective": "El servicio HTTP de h2 no está en el puerto 80: escucha en 8080 y no hay redirect. Descubrí el puerto correcto, descargá la página y comprobá que el 80 está cerrado.",
+  "seed": 1025,
+  "until": "4s",
+  "base": {
+    "version": 1,
+    "seed": 1025,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.0.3",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw1",
+        "ports": [
+          {
+            "name": "p1"
+          },
+          {
+            "name": "p2"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p2"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": [
+      {
+        "at": 0,
+        "host": "h2",
+        "exec": "http-server"
+      }
+    ]
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "curl al puerto 80 falla con connection refused: el listener no está ahí.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "Este servidor HTTP no hace redirects. Levantá http-server 8080 en h2 y pedí http://10.0.0.3:8080/.",
+      "penalty": 15
+    }
+  ],
+  "checks": [
+    {
+      "type": "exec",
+      "name": "curl fetches the page on 8080",
+      "host": "h1",
+      "command": "curl http://10.0.0.3:8080/",
+      "expect": {
+        "stdoutMatches": "netlab"
+      }
+    }
+  ]
+}

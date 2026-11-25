@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "id": "icmp-frag-needed-df",
+  "title": "Fragmentation needed con DF",
+  "kind": "diagnosticar",
+  "objective": "Un ping de 1200 bytes con Don't Fragment recibe ICMP Fragmentation Needed (MTU 576) en r1 y nunca llega a h2. El enlace físico sí soporta el tamaño. Subí el MTU del camino y verificá que el datagrama DF complete el viaje sin errores.",
+  "seed": 1017,
+  "until": "3s",
+  "base": {
+    "version": 1,
+    "seed": 1017,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.0.0.1"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.1.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.0.1.1"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r1",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:01",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:02",
+            "ip": "10.0.1.1",
+            "mask": "255.255.255.0",
+            "mtu": 576
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": { "node": "h1", "iface": "eth0" },
+        "b": { "node": "r1", "iface": "p0" },
+        "params": { "latencyUs": 10 }
+      },
+      {
+        "id": "l2",
+        "a": { "node": "r1", "iface": "p1" },
+        "b": { "node": "h2", "iface": "eth0" },
+        "params": { "latencyUs": 10, "mtuBytes": 700 }
+      }
+    ],
+    "actions": [
+      {
+        "at": 0,
+        "host": "h1",
+        "destIp": "10.0.1.2",
+        "ping": { "count": 1, "size": 1200, "dontFragment": true }
+      }
+    ]
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "Con DF, r1 no puede fragmentar: responde ICMP type 3 code 4 con MTU 576. El datagrama no sale.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "Subí r1:p1 a mtu 1500 y el enlace l2 a mtuBytes 1600; el ping DF de 1200 bytes entra sin fragmentarse.",
+      "penalty": 20
+    }
+  ],
+  "checks": [
+    {
+      "type": "trace",
+      "name": "the router forwards the DF request and the reply",
+      "kind": "state",
+      "minCount": 2,
+      "maxCount": 2
+    },
+    {
+      "type": "trace",
+      "name": "no frame is dropped on the path",
+      "kind": "frame_drop",
+      "minCount": 0,
+      "maxCount": 0
+    },
+    {
+      "type": "route",
+      "name": "r1 keeps 10.0.1.0/24 connected on p1",
+      "router": "r1",
+      "destination": "10.0.1.0/24",
+      "iface": "p1"
+    }
+  ]
+}

@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "id": "l2-vlan-isolated",
+  "title": "VLAN aislada",
+  "kind": "configurar",
+  "objective": "h1 y h2 comparten la red 10.0.0.0/24 pero están en VLANs distintas del mismo switch. Dejá ambos puertos en la VLAN 10 para que se alcancen.",
+  "seed": 1002,
+  "until": "3s",
+  "base": {
+    "version": 1,
+    "seed": 1002,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw1",
+        "ports": [
+          {
+            "name": "p1",
+            "vlan": {
+              "mode": "access",
+              "vlan": 10
+            }
+          },
+          {
+            "name": "p2",
+            "vlan": {
+              "mode": "access",
+              "vlan": 20
+            }
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p2"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": []
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "El ping no falla por IP: el switch no cruza frames entre VLANs distintas.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "p1 ya está en la VLAN 10; cambiá p2 a la misma VLAN de acceso.",
+      "penalty": 10
+    }
+  ],
+  "checks": [
+    {
+      "type": "ping",
+      "name": "h1 reaches h2 in the same VLAN",
+      "from": "h1",
+      "to": "h2",
+      "minReplies": 1
+    },
+    {
+      "type": "macTable",
+      "name": "sw1 learns h2 on p2",
+      "switch": "sw1",
+      "mac": "02:00:00:00:00:0b",
+      "port": "p2"
+    }
+  ]
+}

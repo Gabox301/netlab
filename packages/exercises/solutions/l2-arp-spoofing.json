@@ -1,0 +1,157 @@
+{
+  "version": 1,
+  "seed": 1004,
+  "nodes": [
+    {
+      "type": "host",
+      "id": "h1",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "mac": "02:00:00:00:00:0a",
+          "ip": "10.0.0.2",
+          "mask": "255.255.255.0",
+          "gateway": "10.0.0.1"
+        }
+      ]
+    },
+    {
+      "type": "host",
+      "id": "attacker",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "mac": "02:00:00:00:00:a0",
+          "ip": "10.0.0.66",
+          "mask": "255.255.255.0"
+        }
+      ]
+    },
+    {
+      "type": "host",
+      "id": "h2",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "mac": "02:00:00:00:00:0b",
+          "ip": "10.0.1.2",
+          "mask": "255.255.255.0",
+          "gateway": "10.0.1.1"
+        }
+      ]
+    },
+    {
+      "type": "switch",
+      "id": "sw1",
+      "ports": [
+        {
+          "name": "p1"
+        },
+        {
+          "name": "p2"
+        },
+        {
+          "name": "p3"
+        }
+      ]
+    },
+    {
+      "type": "router",
+      "id": "r1",
+      "interfaces": [
+        {
+          "name": "p0",
+          "mac": "02:00:00:00:00:01",
+          "ip": "10.0.0.1",
+          "mask": "255.255.255.0"
+        },
+        {
+          "name": "p1",
+          "mac": "02:00:00:00:00:02",
+          "ip": "10.0.1.1",
+          "mask": "255.255.255.0"
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "a": {
+        "node": "h1",
+        "iface": "eth0"
+      },
+      "b": {
+        "node": "sw1",
+        "iface": "p1"
+      },
+      "params": {
+        "latencyUs": 10
+      }
+    },
+    {
+      "id": "l2",
+      "a": {
+        "node": "attacker",
+        "iface": "eth0"
+      },
+      "b": {
+        "node": "sw1",
+        "iface": "p2"
+      },
+      "params": {
+        "latencyUs": 10
+      }
+    },
+    {
+      "id": "l3",
+      "a": {
+        "node": "sw1",
+        "iface": "p3"
+      },
+      "b": {
+        "node": "r1",
+        "iface": "p0"
+      },
+      "params": {
+        "latencyUs": 10
+      }
+    },
+    {
+      "id": "l4",
+      "a": {
+        "node": "h2",
+        "iface": "eth0"
+      },
+      "b": {
+        "node": "r1",
+        "iface": "p1"
+      },
+      "params": {
+        "latencyUs": 10
+      }
+    }
+  ],
+  "actions": [
+    {
+      "at": 0,
+      "host": "attacker",
+      "exec": "send eth0 02:00:00:00:00:0a 0x0806 00010800060400020200000000a00a00000102000000000a0a000002"
+    },
+    {
+      "at": "1ms",
+      "host": "h1",
+      "flushArp": "h1"
+    },
+    {
+      "at": "2ms",
+      "host": "h1",
+      "exec": "ping -c 1 10.0.1.2"
+    },
+    {
+      "at": "500ms",
+      "host": "h2",
+      "exec": "help"
+    }
+  ]
+}

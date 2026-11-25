@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "id": "rt-two-networks",
+  "title": "Dos redes con un router",
+  "kind": "configurar",
+  "objective": "r1 une 10.0.0.0/24 y 10.0.1.0/24, pero ni h1 ni h2 tienen gateway. Configurá ambos hosts para que se alcancen a través de r1.",
+  "seed": 1010,
+  "until": "3s",
+  "base": {
+    "version": 1,
+    "seed": 1010,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.1.2",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r1",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:01",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:02",
+            "ip": "10.0.1.1",
+            "mask": "255.255.255.0"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "r1",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "r1",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": []
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "El router ya tiene las dos redes conectadas; lo que falta es el next hop en cada host.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "h1 debe apuntar a 10.0.0.1 y h2 a 10.0.1.1, cada uno en su propia subred.",
+      "penalty": 10
+    }
+  ],
+  "checks": [
+    {
+      "type": "ping",
+      "name": "h1 reaches h2 through r1",
+      "from": "h1",
+      "to": "h2",
+      "minReplies": 1
+    },
+    {
+      "type": "route",
+      "name": "r1 keeps 10.0.0.0/24 connected on p0",
+      "router": "r1",
+      "destination": "10.0.0.0/24",
+      "iface": "p0"
+    },
+    {
+      "type": "route",
+      "name": "r1 keeps 10.0.1.0/24 connected on p1",
+      "router": "r1",
+      "destination": "10.0.1.0/24",
+      "iface": "p1"
+    }
+  ]
+}

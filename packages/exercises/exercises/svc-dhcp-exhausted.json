@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "id": "svc-dhcp-exhausted",
+  "title": "DHCP agotado: dirección estática",
+  "kind": "diagnosticar",
+  "objective": "h1 arranca sin dirección y dhclient no recibe ningún DHCPACK: el servicio no tiene pool disponible. Configurá una dirección estática en 10.0.0.0/24 y verificá que h1 alcanza a h2.",
+  "seed": 1024,
+  "until": "12s",
+  "base": {
+    "version": 1,
+    "seed": 1024,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.0.3",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw1",
+        "ports": [
+          {
+            "name": "p1"
+          },
+          {
+            "name": "p2"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p2"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": [
+      {
+        "at": 0,
+        "host": "h1",
+        "exec": "dhclient"
+      }
+    ]
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "dhclient reintenta y termina con no DHCPACK: el silencio del servidor no es un lease.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "Después del intento DHCP, asigná 10.0.0.2/24 a eth0 con ip addr set y volvé a probar el ping.",
+      "penalty": 15
+    }
+  ],
+  "checks": [
+    {
+      "type": "ping",
+      "name": "the static address restores reachability",
+      "from": "h1",
+      "to": "h2",
+      "minReplies": 1
+    }
+  ]
+}

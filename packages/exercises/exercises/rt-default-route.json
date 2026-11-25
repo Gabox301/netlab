@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "id": "rt-default-route",
+  "title": "Ruta por defecto",
+  "kind": "configurar",
+  "objective": "r1 solo tiene las redes conectadas y no sabe llegar a 10.0.2.0/24, que está detrás de r2. Instalá una ruta por defecto en r1 hacia 10.0.1.2 y verificá el ping de h1 a h2.",
+  "seed": 1011,
+  "until": "5s",
+  "base": {
+    "version": 1,
+    "seed": 1011,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.0.0.1"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.2.2",
+            "mask": "255.255.255.0",
+            "gateway": "10.0.2.1"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r1",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:01",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:02",
+            "ip": "10.0.1.1",
+            "mask": "255.255.255.252"
+          }
+        ]
+      },
+      {
+        "type": "router",
+        "id": "r2",
+        "interfaces": [
+          {
+            "name": "p0",
+            "mac": "02:00:00:00:00:03",
+            "ip": "10.0.1.2",
+            "mask": "255.255.255.252"
+          },
+          {
+            "name": "p1",
+            "mac": "02:00:00:00:00:04",
+            "ip": "10.0.2.1",
+            "mask": "255.255.255.0"
+          }
+        ],
+        "routes": [
+          {
+            "destination": "0.0.0.0/0",
+            "gateway": "10.0.1.1",
+            "iface": "p0"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "r1",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "r1",
+          "iface": "p1"
+        },
+        "b": {
+          "node": "r2",
+          "iface": "p0"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l3",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "r2",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": []
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "r2 ya tiene default hacia r1; el regreso funciona. Falta que r1 sepa salir hacia cualquier destino desconocido.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "Agregá en r1 la ruta 0.0.0.0/0 por p1 con gateway 10.0.1.2.",
+      "penalty": 15
+    }
+  ],
+  "checks": [
+    {
+      "type": "ping",
+      "name": "h1 reaches h2 through the default route",
+      "from": "h1",
+      "to": "h2",
+      "minReplies": 1
+    },
+    {
+      "type": "route",
+      "name": "r1 installs the default route via r2",
+      "router": "r1",
+      "destination": "0.0.0.0/0",
+      "gateway": "10.0.1.2",
+      "iface": "p1"
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "id": "tcp-zero-window",
+  "title": "Ventana TCP observable",
+  "kind": "analizar",
+  "objective": "Abrí una conexión TCP contra el servidor HTTP de h2 y leé con ss la ventana de congestión y el umbral (Cwnd/Ssthresh) que el socket mantiene en ESTABLISHED. La ventana anunciada es la evidencia de flow control que este laboratorio expone.",
+  "seed": 1020,
+  "until": "4s",
+  "base": {
+    "version": 1,
+    "seed": 1020,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw1",
+        "ports": [
+          {
+            "name": "p1"
+          },
+          {
+            "name": "p2"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p2"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": [
+      {
+        "at": 0,
+        "host": "h1",
+        "exec": "nc 10.0.0.2 80"
+      },
+      {
+        "at": "500ms",
+        "host": "h1",
+        "exec": "help"
+      }
+    ]
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "El socket tiene que existir para que ss muestre una fila: nc abre la conexión y el servidor la acepta.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "Levantá http-server en h2 antes del nc; después corré ss en h1 y buscá la columna Cwnd/Ssthresh de la fila ESTABLISHED.",
+      "penalty": 15
+    }
+  ],
+  "checks": [
+    {
+      "type": "exec",
+      "name": "ss reports an established socket with cwnd and ssthresh",
+      "host": "h1",
+      "command": "ss",
+      "expect": {
+        "stdoutMatches": "ESTABLISHED\\s+10\\.0\\.0\\.1:\\d+\\s+10\\.0\\.0\\.2:80\\s+\\d+\\s+\\d+"
+      }
+    }
+  ]
+}

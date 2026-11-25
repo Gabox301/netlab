@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "id": "tcp-congestion",
+  "title": "Cuello de botella y throughput",
+  "kind": "optimizar",
+  "objective": "El enlace de h2 está limitado a 1000 bytes/s: el handshake y la página no llegan antes del timeout de curl. Subí el ancho de banda del enlace para que la descarga HTTP complete en menos de un segundo.",
+  "seed": 1021,
+  "until": "4s",
+  "base": {
+    "version": 1,
+    "seed": 1021,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.0.2",
+            "mask": "255.255.255.0"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw1",
+        "ports": [
+          {
+            "name": "p1"
+          },
+          {
+            "name": "p2"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p2"
+        },
+        "params": {
+          "latencyUs": 10,
+          "bandwidthBps": 1000,
+          "queueLimit": 4
+        }
+      }
+    ],
+    "actions": [
+      {
+        "at": 0,
+        "host": "h2",
+        "exec": "http-server"
+      }
+    ]
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "El servidor está bien y el ping chico pasa; la página no llega por el ancho de banda del enlace de h2.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "Subí bandwidthBps del enlace l2 a 100000 (o más) y dejá el resto igual.",
+      "penalty": 20
+    }
+  ],
+  "checks": [
+    {
+      "type": "exec",
+      "name": "curl downloads the page before the timeout",
+      "host": "h1",
+      "command": "curl http://10.0.0.2/",
+      "expect": {
+        "stdoutMatches": "netlab"
+      }
+    }
+  ]
+}

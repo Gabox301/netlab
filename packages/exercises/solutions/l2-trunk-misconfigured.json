@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "seed": 1003,
+  "nodes": [
+    {
+      "type": "host",
+      "id": "h1",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "mac": "02:00:00:00:00:0a",
+          "ip": "10.0.0.1",
+          "mask": "255.255.255.0"
+        }
+      ]
+    },
+    {
+      "type": "host",
+      "id": "h2",
+      "interfaces": [
+        {
+          "name": "eth0",
+          "mac": "02:00:00:00:00:0b",
+          "ip": "10.0.0.2",
+          "mask": "255.255.255.0"
+        }
+      ]
+    },
+    {
+      "type": "switch",
+      "id": "sw1",
+      "ports": [
+        {
+          "name": "p1",
+          "vlan": {
+            "mode": "access",
+            "vlan": 10
+          }
+        },
+        {
+          "name": "p2",
+          "vlan": {
+            "mode": "trunk",
+            "allowed": [10, 20],
+            "native": 10
+          }
+        }
+      ]
+    },
+    {
+      "type": "switch",
+      "id": "sw2",
+      "ports": [
+        {
+          "name": "p1",
+          "vlan": {
+            "mode": "access",
+            "vlan": 10
+          }
+        },
+        {
+          "name": "p2",
+          "vlan": {
+            "mode": "trunk",
+            "allowed": [10, 20],
+            "native": 10
+          }
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "a": {
+        "node": "h1",
+        "iface": "eth0"
+      },
+      "b": {
+        "node": "sw1",
+        "iface": "p1"
+      },
+      "params": {
+        "latencyUs": 10
+      }
+    },
+    {
+      "id": "l2",
+      "a": {
+        "node": "sw1",
+        "iface": "p2"
+      },
+      "b": {
+        "node": "sw2",
+        "iface": "p2"
+      },
+      "params": {
+        "latencyUs": 10
+      }
+    },
+    {
+      "id": "l3",
+      "a": {
+        "node": "h2",
+        "iface": "eth0"
+      },
+      "b": {
+        "node": "sw2",
+        "iface": "p1"
+      },
+      "params": {
+        "latencyUs": 10
+      }
+    }
+  ],
+  "actions": []
+}

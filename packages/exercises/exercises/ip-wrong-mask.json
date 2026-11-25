@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "id": "ip-wrong-mask",
+  "title": "Máscara incorrecta en el mismo cable",
+  "kind": "diagnosticar",
+  "objective": "h1 (10.0.0.10/25) y h2 (10.0.0.200/25) están en el mismo switch pero en mitades distintas de la /24. Corregí la máscara para que sean vecinos directos y verificá el ping.",
+  "seed": 1007,
+  "until": "3s",
+  "base": {
+    "version": 1,
+    "seed": 1007,
+    "nodes": [
+      {
+        "type": "host",
+        "id": "h1",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0a",
+            "ip": "10.0.0.10",
+            "mask": "255.255.255.128"
+          }
+        ]
+      },
+      {
+        "type": "host",
+        "id": "h2",
+        "interfaces": [
+          {
+            "name": "eth0",
+            "mac": "02:00:00:00:00:0b",
+            "ip": "10.0.0.200",
+            "mask": "255.255.255.128"
+          }
+        ]
+      },
+      {
+        "type": "switch",
+        "id": "sw1",
+        "ports": [
+          {
+            "name": "p1"
+          },
+          {
+            "name": "p2"
+          }
+        ]
+      }
+    ],
+    "links": [
+      {
+        "id": "l1",
+        "a": {
+          "node": "h1",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p1"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      },
+      {
+        "id": "l2",
+        "a": {
+          "node": "h2",
+          "iface": "eth0"
+        },
+        "b": {
+          "node": "sw1",
+          "iface": "p2"
+        },
+        "params": {
+          "latencyUs": 10
+        }
+      }
+    ],
+    "actions": []
+  },
+  "hints": [
+    {
+      "level": 1,
+      "text": "Con /25, 10.0.0.10 está en 10.0.0.0/25 y 10.0.0.200 en 10.0.0.128/25: no comparten subred.",
+      "penalty": 5
+    },
+    {
+      "level": 2,
+      "text": "La red es una /24; poné 255.255.255.0 en ambos hosts (o al menos en h2) y no hace falta gateway.",
+      "penalty": 10
+    }
+  ],
+  "checks": [
+    {
+      "type": "ping",
+      "name": "h1 reaches h2 with the /24 mask",
+      "from": "h1",
+      "to": "h2",
+      "minReplies": 1
+    },
+    {
+      "type": "macTable",
+      "name": "sw1 learns h2 on p2",
+      "switch": "sw1",
+      "mac": "02:00:00:00:00:0b",
+      "port": "p2"
+    }
+  ]
+}
