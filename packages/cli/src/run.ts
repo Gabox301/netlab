@@ -30,6 +30,7 @@ import {
   type Trace,
   TraceBus,
 } from "@netlab/core";
+import { generateSubnetProblem } from "@netlab/exercises";
 import { Shell } from "@netlab/shell";
 import {
   DEFAULT_UNTIL_US,
@@ -251,7 +252,7 @@ export async function runScenario(
       const host = hostOf(path, action.host);
       let shell = shells.get(action.host);
       if (shell === undefined) {
-        shell = new Shell({ host, sim });
+        shell = new Shell({ host, sim, subnet: generateSubnetProblem });
         shells.set(action.host, shell);
       }
       const command = action.exec;

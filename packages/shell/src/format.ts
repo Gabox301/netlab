@@ -422,3 +422,50 @@ export function formatHttpGetLines(view: HttpGetView): Array<string> {
   }
   return lines;
 }
+
+/** One generated subnetting drill as `subnet new` prints it (F-117). */
+export interface SubnetProblemView {
+  /** Drill theme (`cidr`, `vlsm`, `summary`, `usable`). */
+  readonly topic: string;
+  /** The statement handed to the student. */
+  readonly prompt: string;
+  /** Field names, in the order the answers must be given. */
+  readonly fields: ReadonlyArray<string>;
+}
+
+/**
+ * `subnet new` output: the theme, the statement and the exact shape of the
+ * answer, so a drill is answerable without reading the docs.
+ */
+export function formatSubnetProblemLines(
+  view: SubnetProblemView,
+): Array<string> {
+  return [
+    `subnet drill: ${view.topic}`,
+    view.prompt,
+    `answer: subnet answer ${view.fields.join(" ")}`,
+  ];
+}
+
+/** One graded answer as `subnet answer` prints it. */
+export interface SubnetCheckView {
+  readonly pass: boolean;
+  /** Canonical answer, one `field=value` pair per field. */
+  readonly expected: string;
+  /** The correction, explained step by step. */
+  readonly steps: ReadonlyArray<string>;
+}
+
+/**
+ * `subnet answer` output: a verdict line, the canonical answers when the
+ * drill failed, and then every step of the correction — right and wrong
+ * answers both explain themselves.
+ */
+export function formatSubnetAnswerLines(view: SubnetCheckView): Array<string> {
+  const lines = [view.pass ? "answer: correct" : "answer: incorrect"];
+  if (!view.pass) {
+    lines.push(`expected: ${view.expected}`);
+  }
+  lines.push(...view.steps);
+  return lines;
+}

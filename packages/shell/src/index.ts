@@ -54,6 +54,10 @@ export {
   type ShellCommand,
   type ShellParseResult,
   type SsCommand,
+  SUBNET_TOPICS,
+  type SubnetAnswerCommand,
+  type SubnetNewCommand,
+  type SubnetTopic,
   type TracerouteCommand,
 } from "./parse";
 export {
@@ -69,4 +73,7 @@ export {
   DEFAULT_TRACEROUTE_TIMEOUT_US,
   Shell,
   type ShellOptions,
+  type SubnetCheckLike,
+  type SubnetProblemLike,
+  type SubnetTrainer,
 } from "./shell";

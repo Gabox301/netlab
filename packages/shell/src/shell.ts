@@ -22,6 +22,14 @@
  * Fase 6 adds the packet crafter (F-101): `send` transmits one hand-built
  * Ethernet frame through `Host.sendRaw()`. It is the CLI half of the feature;
  * the layered web form is a UI concern and lives outside this package.
+ *
+ * Fase 6 also adds the subnetting trainer session (F-117): `subnet new` draws a
+ * drill with the simulation PRNG, keeps it pending and prints it, and
+ * `subnet answer` grades it and explains the correction step by step. The
+ * generator itself lives in `@netlab/exercises` and arrives through
+ * `ShellOptions.subnet`: the shell owns the session, the trainer owns the
+ * math, and the two packages stay siblings (ADR-001) instead of forming an
+ * import cycle.
  */
 
 import { Ipv4Address, MacAddress } from "@netlab/bytes";
@@ -65,6 +73,8 @@ import {
   formatRouteLines,
   formatSendLines,
   formatSsLines,
+  formatSubnetAnswerLines,
+  formatSubnetProblemLines,
 } from "./format";
 import {
   hostNeighborEntries,
@@ -85,6 +95,10 @@ import {
   parseCommandLine,
   type SendCommand,
   type ShellCommand,
+  SUBNET_TOPICS,
+  type SubnetAnswerCommand,
+  type SubnetNewCommand,
+  type SubnetTopic,
   type TracerouteCommand,
 } from "./parse";
 
@@ -157,8 +171,49 @@ const HELP_LINES: ReadonlyArray<string> = [
   "send IFACE DSTMAC ETHERTYPE HEX - transmit a hand-built Ethernet frame",
   "http-server [PORT] - serve a fixed HTTP/1.0 page (default 80)",
   "curl http://HOST[:PORT][/PATH] - one HTTP/1.0 GET, print the body",
+  `subnet new [${SUBNET_TOPICS.join("|")}] - start a subnetting drill`,
+  "subnet answer VALUE... - grade the pending drill, step by step",
   "help - this list",
 ];
+
+/** One graded answer, as the injected subnetting trainer reports it (F-117). */
+export interface SubnetCheckLike {
+  /** True when every field matched. */
+  readonly pass: boolean;
+  /** Canonical answer, one `field=value` pair per asked field. */
+  readonly expected: string;
+  /** The correction, explained step by step. */
+  readonly steps: ReadonlyArray<string>;
+}
+
+/**
+ * One drill, as the injected subnetting trainer reports it (F-117).
+ *
+ * The shell reads `topic`, `prompt`, `fields` and `check`; the rest of the
+ * drill travels with it so a UI can render the statements it already has.
+ * `generateSubnetProblem` from `@netlab/exercises` fits as is.
+ */
+export interface SubnetProblemLike {
+  readonly topic: SubnetTopic;
+  readonly title: string;
+  readonly prompt: string;
+  readonly fields: ReadonlyArray<string>;
+  readonly expected: ReadonlyArray<string>;
+  readonly steps: ReadonlyArray<string>;
+  check(answer: string): SubnetCheckLike;
+}
+
+/**
+ * Injected subnetting trainer: `(topic, rand) => drill`.
+ *
+ * `rand` is the simulation PRNG (`sim.random.next`), so a replayed lab draws
+ * the same drill. `generateSubnetProblem` from `@netlab/exercises` satisfies
+ * this shape as is.
+ */
+export type SubnetTrainer = (
+  topic: SubnetTopic,
+  rand: () => number,
+) => SubnetProblemLike;
 
 /** Accepted by the {@link Shell} constructor. */
 export interface ShellOptions {
@@ -199,6 +254,12 @@ export interface ShellOptions {
   dhcpRetries?: number;
   /** Virtual window `nc` keeps collecting replies. */
   ncTimeoutUs?: number;
+  /**
+   * Subnetting trainer used by `subnet new` (F-117). Without it the command
+   * is an explicit `unsupported` error; the CLI and the UI pass
+   * `generateSubnetProblem` from `@netlab/exercises`.
+   */
+  subnet?: SubnetTrainer;
 }
 
 interface ProbeOutcome {
@@ -513,6 +574,8 @@ export class Shell {
   private readonly dhcpRetries: number;
   private readonly ncTimeoutUs: number;
   private readonly neighbors: NeighborProvider;
+  /** Injected subnetting trainer; absent means `subnet new` is unsupported. */
+  private readonly subnet: SubnetTrainer | undefined;
   /** Candidate neighbors learned from successful sends, per interface. */
   private readonly peers = new Map<string, Set<string>>();
   /** One stub resolver per server, so its TTL cache survives the command. */
@@ -524,6 +587,8 @@ export class Shell {
   private readonly httpServers = new Map<number, TcpSocket>();
   /** Request bytes accumulated per accepted HTTP connection. */
   private readonly httpRequests = new Map<TcpSocket, Uint8Array>();
+  /** Drill waiting for `subnet answer`, replaced by the next `subnet new`. */
+  private pendingSubnet: SubnetProblemLike | undefined;
 
   constructor(options: ShellOptions) {
     this.host = options.host;
@@ -572,6 +637,7 @@ export class Shell {
     this.neighbors =
       options.neighbors ??
       ((host) => hostNeighborEntries(host, this.neighborCandidates()));
+    this.subnet = options.subnet;
 
     const previousReply = this.host.onEchoReply;
     const previousError = this.host.onIcmpError;
@@ -658,6 +724,10 @@ export class Shell {
         return this.httpServer(command);
       case "http.get":
         return this.httpGet(command);
+      case "subnet.new":
+        return this.subnetNew(command);
+      case "subnet.answer":
+        return this.subnetAnswer(command);
       case "help":
         return [...HELP_LINES];
       default:
@@ -1108,6 +1178,55 @@ export class Shell {
       );
     }
     return formatHttpGetLines(response);
+  }
+
+  /**
+   * `subnet new [THEME]`: draw one drill, remember it and print it (F-117).
+   *
+   * The theme, when omitted, comes from the simulation PRNG too, so a replay
+   * of the same lab always starts the same drill. The trainer receives
+   * `sim.random.next`, never `Math.random`.
+   */
+  private subnetNew(command: SubnetNewCommand): Array<string> {
+    const trainer = this.subnet;
+    if (trainer === undefined) {
+      throw new ShellCommandError(
+        shellError(
+          "unsupported",
+          "subnet",
+          "no subnetting trainer installed: pass `subnet` in ShellOptions",
+        ),
+      );
+    }
+    const topic = command.topic ?? this.randomSubnetTopic();
+    const drill = trainer(topic, this.sim.random.next.bind(this.sim.random));
+    this.pendingSubnet = drill;
+    return formatSubnetProblemLines(drill);
+  }
+
+  /**
+   * `subnet answer VALUE...`: grade the pending drill against its own
+   * correction. The drill stays pending, so a wrong answer can be retried
+   * without losing the statement.
+   */
+  private subnetAnswer(command: SubnetAnswerCommand): Array<string> {
+    const drill = this.pendingSubnet;
+    if (drill === undefined) {
+      throw new ShellCommandError(
+        shellError(
+          "execution_failed",
+          "subnet",
+          "no pending drill: start one with subnet new",
+        ),
+      );
+    }
+    return formatSubnetAnswerLines(drill.check(command.values.join(" ")));
+  }
+
+  /** One theme from the simulation PRNG; `subnet new` without an argument. */
+  private randomSubnetTopic(): SubnetTopic {
+    const index = Math.floor(this.sim.random.next() * SUBNET_TOPICS.length);
+    return SUBNET_TOPICS[index] ?? SUBNET_TOPICS[0];
   }
 
   /** `@server`, then the configured resolver, then the gateway on port 53. */

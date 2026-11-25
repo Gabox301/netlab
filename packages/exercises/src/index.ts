@@ -40,6 +40,15 @@ export {
   type TraceKind,
 } from "./schema";
 export {
+  generateSubnetProblem,
+  isSubnetTopic,
+  SUBNET_TOPICS,
+  type SubnetCheck,
+  type SubnetProblem,
+  type SubnetRandom,
+  type SubnetTopic,
+} from "./subnet";
+export {
   type CheckResult,
   type ExerciseExample,
   type ExerciseValidationResult,

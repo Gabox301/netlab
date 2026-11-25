@@ -26,6 +26,17 @@ export const MAX_NC_PAYLOAD_BYTES = 65507;
 /** Port `http-server` and `curl` use when none is given. */
 export const DEFAULT_HTTP_PORT = 80;
 
+/**
+ * Themes the subnetting trainer accepts (F-117). The list mirrors the drills
+ * `@netlab/exercises` generates; the shell keeps its own copy because it must
+ * not import that package (ADR-001: siblings in the dependency graph, and a
+ * package cycle is not allowed).
+ */
+export const SUBNET_TOPICS = ["cidr", "vlsm", "summary", "usable"] as const;
+
+/** One subnetting drill theme. */
+export type SubnetTopic = (typeof SUBNET_TOPICS)[number];
+
 /** One DNS label: alphanumeric, internal hyphens, 1..63 characters. */
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
@@ -147,6 +158,26 @@ export interface HttpGetCommand {
   readonly path: string;
 }
 
+/**
+ * `subnet new [THEME]`: start a subnetting drill (F-117).
+ *
+ * The theme is optional on purpose: without it the shell asks the simulation
+ * PRNG for one, so a replay still picks the same drill.
+ */
+export interface SubnetNewCommand {
+  readonly kind: "subnet.new";
+  readonly topic?: SubnetTopic;
+}
+
+/**
+ * `subnet answer VALUE...`: grade the pending drill. The values are kept as
+ * typed tokens; the drill decides what a field must look like.
+ */
+export interface SubnetAnswerCommand {
+  readonly kind: "subnet.answer";
+  readonly values: ReadonlyArray<string>;
+}
+
 export interface HelpCommand {
   readonly kind: "help";
 }
@@ -170,6 +201,8 @@ export type ShellCommand =
   | SendCommand
   | HttpServerCommand
   | HttpGetCommand
+  | SubnetNewCommand
+  | SubnetAnswerCommand
   | HelpCommand;
 
 /** Parse outcome; failures are data, not exceptions. */
@@ -768,6 +801,67 @@ function isMac(text: string): boolean {
   }
 }
 
+function isSubnetTopic(text: string): text is SubnetTopic {
+  return (SUBNET_TOPICS as ReadonlyArray<string>).includes(text);
+}
+
+/**
+ * `subnet new [THEME]` and `subnet answer VALUE...` (F-117): the trainer's
+ * grammar. Themes are validated here so a typo is a typed error before the
+ * shell touches its session state; answers are free-form tokens because the
+ * drill, not the parser, knows what each field means.
+ */
+function parseSubnet(tokens: ReadonlyArray<string>): ShellParseResult {
+  const usage =
+    `usage: subnet new [${SUBNET_TOPICS.join("|")}] | ` +
+    "subnet answer VALUE...";
+  const verb = tokens[1];
+  if (verb === undefined) {
+    return fail("missing_argument", "subnet", usage);
+  }
+  if (verb === "new") {
+    const topic = tokens[2];
+    if (topic === undefined) {
+      return ok({ kind: "subnet.new" });
+    }
+    if (topic.startsWith("-")) {
+      return fail("unknown_flag", "subnet", `unknown flag: ${topic}`);
+    }
+    const extra = tokens[3];
+    if (extra !== undefined) {
+      return fail(
+        "unexpected_argument",
+        "subnet",
+        `unexpected argument: ${extra}`,
+      );
+    }
+    if (!isSubnetTopic(topic)) {
+      return fail(
+        "invalid_argument",
+        "subnet",
+        `unknown theme: ${topic} (use ${SUBNET_TOPICS.join(", ")})`,
+      );
+    }
+    return ok({ kind: "subnet.new", topic });
+  }
+  if (verb === "answer") {
+    const values = tokens.slice(2);
+    if (values.length === 0) {
+      return fail("missing_argument", "subnet", usage);
+    }
+    const flag = values.find((value) => value.startsWith("-"));
+    if (flag !== undefined) {
+      return fail("unknown_flag", "subnet", `unknown flag: ${flag}`);
+    }
+    return ok({ kind: "subnet.answer", values });
+  }
+  return fail(
+    "unknown_subcommand",
+    "subnet",
+    `unknown subnet subcommand: ${verb}`,
+  );
+}
+
 /**
  * `send IFACE DSTMAC ETHERTYPE HEX`: build one Ethernet frame by hand (F-101).
  *
@@ -943,6 +1037,8 @@ function parse(line: string): ShellParseResult {
       return parseHttpServer(tokens);
     case "curl":
       return parseCurl(tokens);
+    case "subnet":
+      return parseSubnet(tokens);
     case "arp":
       return parseArp(tokens);
     case "help":
