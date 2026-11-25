@@ -181,3 +181,10 @@ describe("parse: typed errors (S9)", () => {
     expect(rejected("ip wat").command).toBe("ip");
   });
 });
+
+describe("parse: help", () => {
+  test("accepts bare help and rejects extra arguments", () => {
+    expect(accepted("help")).toEqual({ kind: "help" });
+    expect(rejected("help ping").code).toBe("unexpected_argument");
+  });
+});

@@ -61,6 +61,18 @@ export const DEFAULT_TRACEROUTE_MAX_HOPS = 30;
 /** Echo data size used by traceroute probes. */
 const TRACEROUTE_SIZE = 32;
 
+/** Static listing for the `help` command (no state, no clock). */
+const HELP_LINES: ReadonlyArray<string> = [
+  "ip addr [show] [dev IFACE] - show addresses",
+  "ip link [show] - show link state",
+  "ip route show - show routes",
+  "ip neigh show - show neighbor cache",
+  "arp - show ARP cache",
+  "ping [-c COUNT] [-s SIZE] [-t TTL] DST - echo requests",
+  "traceroute DST - trace hops",
+  "help - this list",
+];
+
 /** Accepted by the {@link Shell} constructor. */
 export interface ShellOptions {
   /** Host the commands operate on. */
@@ -300,6 +312,8 @@ export class Shell {
         return this.ping(command);
       case "traceroute":
         return this.traceroute(command);
+      case "help":
+        return [...HELP_LINES];
       default:
         return assertNever(command);
     }

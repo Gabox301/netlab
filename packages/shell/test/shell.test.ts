@@ -56,4 +56,14 @@ describe("Shell API", () => {
     expect(observed).toHaveLength(1);
     expect(observed[0]?.srcIp).toBe(IP_B_SAME_SUBNET);
   });
+
+  test("help lists the available commands", async () => {
+    const lab = sameSubnetLab(131);
+    const shell = new Shell({ host: lab.a, sim: lab.sim });
+    const lines = await shell.exec("help");
+    const text = lines.join("\n");
+    for (const command of ["ip", "arp", "ping", "traceroute", "help"]) {
+      expect(text).toContain(command);
+    }
+  });
 });

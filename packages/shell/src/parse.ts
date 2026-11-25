@@ -71,6 +71,10 @@ export interface TracerouteCommand {
   readonly dst: string;
 }
 
+export interface HelpCommand {
+  readonly kind: "help";
+}
+
 /** Commands accepted by {@link parseCommandLine}. */
 export type ShellCommand =
   | IpAddrShowCommand
@@ -81,7 +85,8 @@ export type ShellCommand =
   | IpNeighShowCommand
   | ArpCommand
   | PingCommand
-  | TracerouteCommand;
+  | TracerouteCommand
+  | HelpCommand;
 
 /** Parse outcome; failures are data, not exceptions. */
 export type ShellParseResult =
@@ -499,6 +504,15 @@ function parse(line: string): ShellParseResult {
       return parseTraceroute(tokens);
     case "arp":
       return parseArp(tokens);
+    case "help":
+      if (tokens.length > 1) {
+        return fail(
+          "unexpected_argument",
+          "help",
+          `unexpected argument: ${tokens[1] ?? ""}`,
+        );
+      }
+      return ok({ kind: "help" });
     default:
       return fail("unknown_command", command, `unknown command: ${command}`);
   }
