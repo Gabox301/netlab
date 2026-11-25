@@ -1,5 +1,5 @@
 /**
- * TCP connection state machine (F-54/55) and data transfer (F-56).
+ * TCP connection state machine (F-54/55) and data transfer (F-56/57).
  *
  * The eleven states of RFC 793, the three-way handshake (including the
  * simultaneous open that starts from SYN_SENT on both ends), the four-way
@@ -7,22 +7,50 @@
  * TCP port namespace (`Host.bindTcp` / `Host.onTcpSegment`); all connection
  * state lives here.
  *
- * Scope of hito 5.2: payload now counts against the sequence space. `send()`
- * segments by MSS into a send buffer tracked with SND.UNA/SND.NXT and gated
- * by a *fixed* send window; inbound payload is delivered in order (an
- * out-of-order segment is buffered until the gap is filled) and every valid
- * segment earns one cumulative ACK carrying RCV.NXT. Duplicates are
- * re-ACKed without being delivered. There is still no sliding/flow-control
- * window (5.3), no round-trip timer and no retransmission (5.4) and no
- * congestion control (5.5): a lost segment stays pending forever, so a
- * transfer only completes on a lossless path. Control traffic does not gate
- * on data: FIN is queued behind outstanding data and only leaves once the
- * peer has acknowledged every byte, which needs the same lossless path.
+ * Scope of hito 5.2: payload counts against the sequence space. `send()`
+ * segments by MSS into a send buffer tracked with SND.UNA/SND.NXT; inbound
+ * payload is delivered in order (an out-of-order segment is buffered until the
+ * gap is filled) and every valid segment earns one cumulative ACK carrying
+ * RCV.NXT. Duplicates are re-ACKed without being delivered.
+ *
+ * Scope of hito 5.3 — the sliding window and flow control:
+ *
+ * - Sender. The bytes in flight are the ones with `SND.NXT - SND.UNA` below
+ *   `min(sendWindow, SND.WND)`, where SND.WND is the window the peer last
+ *   advertised (taken from the SYN and then from every *valid* ACK, i.e. every
+ *   ACK in `[SND.UNA, SND.NXT]`, duplicates included — a duplicate ACK is a
+ *   legal carrier for a window update). `sendWindow` is the fixed stand-in for
+ *   `cwnd`: congestion control (5.5) is out of scope, so it stays frozen at
+ *   its configured value instead of growing or backing off. A queued chunk is
+ *   truncated to whatever window space is left, so a window that is not a
+ *   multiple of the MSS still makes progress.
+ * - Zero-window probing. When SND.WND reaches zero with data still queued, a
+ *   *fixed-interval persist timer* (`zeroWindowProbeUs`) sends the first
+ *   pending byte at SND.NXT without spending sequence space and re-arms
+ *   itself, so the peer answers with its current window. This is deliberately
+ *   not the RTO of hito 5.4: no RTT estimate, no backoff, no retransmission
+ *   queue — a lost segment still stays lost.
+ * - Receiver. The advertised window is `capacity - buffered`, where the
+ *   buffer is both the in-order bytes `read()` has not drained yet and the
+ *   out-of-order bytes held for reassembly, and `capacity` (`receiveCapacity`,
+ *   default 64 KB - 1 so it fits the 16-bit header field) is configurable.
+ *   Shrink is forbidden: in-order delivery advances RCV.NXT by exactly the
+ *   bytes it removes from the free space, so the advertised right edge
+ *   `RCV.NXT + window` never moves left; the only decrease a peer can see is
+ *   the floor of zero when the buffer is completely full. `read()` that
+ *   reopens a zero window sends a window update at once. Payload that does not
+ *   fit the current window is dropped and re-ACKed, never delivered.
+ *
+ * Still out of scope: RTO, retransmission and fast retransmit (5.4) and
+ * congestion control (5.5). A transfer therefore only completes on a lossless
+ * path. Control traffic does not gate on data: FIN is queued behind
+ * outstanding data and only leaves once the peer has acknowledged every byte.
  *
  * Time and randomness come from the `Simulation`: the ISN and the ephemeral
- * local port are drawn from `sim.random` (overridable for tests) and
- * TIME_WAIT is a `sim.schedule()` event, so `runUntil()` — never `runAll()`
- * — drives a close with a timer still armed.
+ * local port are drawn from `sim.random` (overridable for tests), while
+ * TIME_WAIT and the zero-window persist timer are `sim.schedule()` events, so
+ * `runUntil()` — never `runAll()` — drives a close or a stalled sender with a
+ * timer still armed.
  */
 
 import { Ipv4Address } from "@netlab/bytes";
@@ -55,13 +83,28 @@ export const DEFAULT_TIME_WAIT_US = 60_000_000;
 export const DEFAULT_MSS = 1460;
 
 /**
- * Fixed send window (4 segments) until the sliding window of hito 5.3 lands.
- * The peer's advertised window is not consulted yet: we never reduce it.
+ * Fixed number of unacknowledged bytes allowed in flight, on top of whatever
+ * the peer advertises: the stand-in for `cwnd` in hito 5.2/5.3.
+ *
+ * Congestion control (hito 5.5) is out of scope, so this value never grows and
+ * never backs off; the effective send window is `min(sendWindow, SND.WND)`.
  */
 export const DEFAULT_SEND_WINDOW = 4 * DEFAULT_MSS;
 
-/** Window we advertise: constant until flow control lands in hito 5.3. */
-const ADVERTISED_WINDOW = 65535;
+/**
+ * Receive buffer granted by default, and therefore the window a fresh socket
+ * advertises. 65535 is the largest value the 16-bit header field can carry.
+ */
+export const DEFAULT_RECEIVE_CAPACITY = 0xffff;
+
+/**
+ * Fixed interval of the zero-window persist timer. It probes for a window
+ * opening only; it is not the retransmission timeout of hito 5.4.
+ */
+export const DEFAULT_ZERO_WINDOW_PROBE_US = 1_000_000;
+
+/** Largest window value the 16-bit header field can carry. */
+const MAX_WINDOW = 0xffff;
 
 /** RFC 6335 dynamic port range used for ephemeral local ports. */
 const TCP_EPHEMERAL_MIN = 49152;
@@ -95,10 +138,22 @@ export interface TcpSocketOptions {
   mss?: number;
   /**
    * Fixed number of unacknowledged bytes allowed in flight; default
-   * {@link DEFAULT_SEND_WINDOW}. The peer's advertised window is not
-   * consulted until hito 5.3.
+   * {@link DEFAULT_SEND_WINDOW}. Caps the peer's advertised window from above:
+   * the effective send window is `min(sendWindow, SND.WND)`.
    */
   sendWindow?: number;
+  /**
+   * Receive buffer this socket advertises; default
+   * {@link DEFAULT_RECEIVE_CAPACITY}. The advertised window is the free part
+   * of it, so a small value is the observable form of backpressure.
+   */
+  receiveCapacity?: number;
+  /**
+   * Interval of the zero-window persist timer; default
+   * {@link DEFAULT_ZERO_WINDOW_PROBE_US}. Fixed on purpose: no backoff, and
+   * unrelated to the RTO of hito 5.4.
+   */
+  zeroWindowProbeUs?: number;
   /** Called with each in-order chunk of received data (a fresh copy). */
   onData?: (data: Uint8Array) => void;
 }
@@ -150,8 +205,12 @@ export class TcpSocket {
   onData: ((data: Uint8Array) => void) | undefined = undefined;
   /** Segment size used by {@link TcpSocket.send}. */
   readonly mss: number;
-  /** Fixed bytes of unacknowledged data allowed in flight. */
+  /** Fixed cap on unacknowledged data, on top of the peer's window. */
   readonly sendWindow: number;
+  /** Receive buffer whose free part is what this socket advertises. */
+  readonly receiveCapacity: number;
+  /** Fixed interval of the zero-window persist timer. */
+  readonly zeroWindowProbeUs: number;
 
   private readonly initialSequence: number | undefined;
   private readonly timeWaitUs: number;
@@ -169,8 +228,15 @@ export class TcpSocket {
   private sndUnaValue: number | undefined = undefined;
   private sndNxtValue: number | undefined = undefined;
   private rcvNxtValue: number | undefined = undefined;
+  /** Peer's advertised window (SND.WND); undefined until its SYN arrives. */
+  private sndWndValue: number | undefined = undefined;
   private timeWaitTimer: TimerHandle | undefined = undefined;
-  /** Payload waiting for window space; each entry is already an MSS chunk. */
+  private zeroWindowTimer: TimerHandle | undefined = undefined;
+  /**
+   * Payload waiting for window space, as MSS chunks. The head entry can shrink
+   * when only part of the advertised window is left, so it always starts at
+   * SND.NXT.
+   */
   private readonly sendQueue: Array<Uint8Array> = [];
   private sendQueueHead = 0;
   /** FIN asked for by `close()` but not sent yet (data still outstanding). */
@@ -195,7 +261,7 @@ export class TcpSocket {
     this.onStateChange = options.onStateChange;
     this.onData = options.onData;
     const mss = options.mss ?? DEFAULT_MSS;
-    if (!Number.isInteger(mss) || mss <= 0 || mss > ADVERTISED_WINDOW) {
+    if (!Number.isInteger(mss) || mss <= 0 || mss > MAX_WINDOW) {
       throw new RangeError(`mss must be an integer in 1..65535: ${mss}`);
     }
     this.mss = mss;
@@ -206,6 +272,25 @@ export class TcpSocket {
       );
     }
     this.sendWindow = sendWindow;
+    const receiveCapacity = options.receiveCapacity ?? DEFAULT_RECEIVE_CAPACITY;
+    if (
+      !Number.isInteger(receiveCapacity) ||
+      receiveCapacity <= 0 ||
+      receiveCapacity > MAX_WINDOW
+    ) {
+      throw new RangeError(
+        `receiveCapacity must be an integer in 1..65535: ${receiveCapacity}`,
+      );
+    }
+    this.receiveCapacity = receiveCapacity;
+    const zeroWindowProbeUs =
+      options.zeroWindowProbeUs ?? DEFAULT_ZERO_WINDOW_PROBE_US;
+    if (!Number.isFinite(zeroWindowProbeUs) || zeroWindowProbeUs <= 0) {
+      throw new RangeError(
+        `zeroWindowProbeUs must be a finite value > 0: ${zeroWindowProbeUs}`,
+      );
+    }
+    this.zeroWindowProbeUs = zeroWindowProbeUs;
   }
 
   /** Current state of the connection. */
@@ -251,6 +336,19 @@ export class TcpSocket {
   /** Next sequence number this side expects from the peer. */
   get rcvNxt(): number | undefined {
     return this.rcvNxtValue;
+  }
+
+  /**
+   * Window the peer last advertised (SND.WND), or undefined before its SYN.
+   * The bytes actually allowed in flight are `min(sendWindow, sndWnd)`.
+   */
+  get sndWnd(): number | undefined {
+    return this.sndWndValue;
+  }
+
+  /** Window this socket would advertise right now (RCV.WND). */
+  get rcvWnd(): number {
+    return this.freeReceiveWindow();
   }
 
   /**
@@ -337,10 +435,12 @@ export class TcpSocket {
   /**
    * Queue `data` for transmission, segmenting it by MSS.
    *
-   * The bytes are copied. Segments leave immediately while the fixed send
-   * window has room; the rest stays buffered until valid ACKs advance
-   * SND.UNA. Without retransmission (hito 5.4) a lost segment stalls the
-   * window forever, so this only completes on a lossless path.
+   * The bytes are copied. Segments leave while `SND.NXT - SND.UNA` stays under
+   * `min(sendWindow, SND.WND)`, i.e. while both the fixed send window and the
+   * window the peer advertised have room; the rest stays buffered until valid
+   * ACKs advance SND.UNA or the peer reopens its window. Without
+   * retransmission (hito 5.4) a lost segment stalls the window forever, so this
+   * only completes on a lossless path.
    */
   send(data: Uint8Array): void {
     if (this.stateValue !== "ESTABLISHED" && this.stateValue !== "CLOSE_WAIT") {
@@ -364,9 +464,14 @@ export class TcpSocket {
    * Drain the bytes delivered in order so far.
    *
    * Every returned byte is a copy: mutating it cannot corrupt the connection.
-   * Data stays here until `read()` even when `onData` is installed.
+   * Data stays here until `read()` even when `onData` is installed. Draining
+   * frees buffer, so a window that had reached zero is reopened here — and a
+   * zero-to-positive transition is announced at once with an ACK carrying the
+   * new window, otherwise the sender would sit in zero-window probing until its
+   * next persist timer fires.
    */
   read(): Uint8Array {
+    const wasClosed = this.freeReceiveWindow() === 0;
     const total = this.receivedChunks.reduce(
       (sum, chunk) => sum + chunk.length,
       0,
@@ -378,6 +483,10 @@ export class TcpSocket {
       offset += chunk.length;
     }
     this.receivedChunks.length = 0;
+    if (wasClosed && this.freeReceiveWindow() > 0 && this.canSendSegments()) {
+      // A window update is a plain ACK: same sequence numbers, fresh window.
+      this.sendAck();
+    }
     return out;
   }
 
@@ -452,6 +561,8 @@ export class TcpSocket {
     this.remotePortValue = segment.srcPort;
     this.irsValue = segment.seq;
     this.rcvNxtValue = nextSequence(segment.seq);
+    // The SYN is where a TCP first learns the peer's window (SND.WND).
+    this.sndWndValue = segment.window;
     this.issValue = this.pickInitialSequence();
     this.sndUnaValue = nextSequence(this.issValue);
     this.sndNxtValue = nextSequence(this.issValue);
@@ -466,6 +577,7 @@ export class TcpSocket {
     }
     this.irsValue = segment.seq;
     this.rcvNxtValue = nextSequence(segment.seq);
+    this.sndWndValue = segment.window;
     if (segment.flags.ack) {
       if (segment.ack !== this.sndNxtValue) {
         return;
@@ -484,6 +596,7 @@ export class TcpSocket {
     if (!segment.flags.ack || segment.ack !== this.sndNxtValue) {
       return;
     }
+    this.sndWndValue = segment.window;
     this.transition("ESTABLISHED");
   }
 
@@ -592,11 +705,16 @@ export class TcpSocket {
   }
 
   /**
-   * Advance SND.UNA with an ACK of data (or of the SYN/FIN in flight).
+   * Advance SND.UNA with an ACK of data (or of the SYN/FIN in flight) and
+   * refresh SND.WND from the window the peer advertises.
    *
-   * ACKs at or below SND.UNA are duplicates and ACKs beyond SND.NXT are
-   * invalid; both are ignored. A valid ACK frees window space, so queued
-   * payload is flushed and a waiting FIN may leave.
+   * Any ACK in `[SND.UNA, SND.NXT]` is valid and carries a fresh window; ACKs
+   * beyond SND.NXT are invalid and change nothing (RFC 793 §3.9). An ACK at
+   * SND.UNA is a duplicate for the sequence space but still a legitimate
+   * window update — it is how a zero-window probe learns the peer has room
+   * again — so it refreshes SND.WND and retries the send path. An ACK that
+   * advances SND.UNA also frees window space, so queued payload is flushed and
+   * a waiting FIN may leave.
    */
   private processAck(segment: TcpSegment): void {
     if (!segment.flags.ack) {
@@ -609,7 +727,12 @@ export class TcpSocket {
     }
     const acked = (segment.ack - sndUna) >>> 0;
     const inFlight = (sndNxt - sndUna) >>> 0;
-    if (acked === 0 || acked > inFlight) {
+    if (acked > inFlight) {
+      return;
+    }
+    this.sndWndValue = segment.window;
+    if (acked === 0) {
+      this.flushSend();
       return;
     }
     this.sndUnaValue = segment.ack;
@@ -618,10 +741,13 @@ export class TcpSocket {
   }
 
   /**
-   * Send payload while the fixed send window has room.
+   * Send payload while both the fixed send window and the peer's advertised
+   * window have room.
    *
-   * Each queued chunk is at most one MSS, so the window is never split mid
-   * segment and a chunk always fits once the window is empty.
+   * A queued chunk is truncated to the space left, so a window that is not a
+   * multiple of the MSS still makes progress instead of deadlocking. A chunk
+   * always fits once the window is empty and at least one byte is free. When
+   * the peer window is closed the persist timer takes over.
    */
   private flushSend(): void {
     while (this.sendQueueHead < this.sendQueue.length) {
@@ -632,15 +758,119 @@ export class TcpSocket {
         return;
       }
       const inFlight = (sndNxt - sndUna) >>> 0;
-      if (inFlight + chunk.length > this.sendWindow) {
+      const window = this.effectiveSendWindow();
+      const space = window - inFlight;
+      if (space <= 0) {
+        if (window === 0) {
+          this.armZeroWindowProbe();
+        }
         return;
       }
-      this.sendQueueHead += 1;
-      this.sndNxtValue = advanceSequence(sndNxt, chunk.length);
-      this.emit({ ack: true, psh: true }, sndNxt, this.rcvNxtValue ?? 0, chunk);
+      const length = Math.min(chunk.length, space);
+      const piece = length < chunk.length ? chunk.subarray(0, length) : chunk;
+      if (length < chunk.length) {
+        this.sendQueue[this.sendQueueHead] = chunk.subarray(length);
+      } else {
+        this.sendQueueHead += 1;
+      }
+      this.sndNxtValue = advanceSequence(sndNxt, length);
+      this.emit({ ack: true, psh: true }, sndNxt, this.rcvNxtValue ?? 0, piece);
     }
     this.sendQueue.length = 0;
     this.sendQueueHead = 0;
+    this.cancelZeroWindowProbe();
+  }
+
+  /**
+   * Bytes allowed in flight: the peer's window, capped by the fixed send
+   * window that stands in for `cwnd` until hito 5.5.
+   */
+  private effectiveSendWindow(): number {
+    const sndWnd = this.sndWndValue ?? 0;
+    return Math.min(sndWnd, this.sendWindow);
+  }
+
+  /** Arm the fixed-interval zero-window persist timer (idempotent). */
+  private armZeroWindowProbe(): void {
+    if (this.zeroWindowTimer !== undefined) {
+      return;
+    }
+    this.zeroWindowTimer = this.sim.schedule(this.zeroWindowProbeUs, () => {
+      this.zeroWindowTimer = undefined;
+      this.sendZeroWindowProbe();
+    });
+  }
+
+  private cancelZeroWindowProbe(): void {
+    const timer = this.zeroWindowTimer;
+    this.zeroWindowTimer = undefined;
+    timer?.cancel();
+  }
+
+  /**
+   * Zero-window probe: resend the first pending byte at SND.NXT without
+   * spending sequence space, so the peer answers with its current window.
+   *
+   * The byte is outside the peer's closed window, so the peer drops it and
+   * re-ACKs; nothing is lost because SND.NXT did not move. This is a persist
+   * timer, not an RTO: no RTT estimate, no backoff, no retransmission queue
+   * (hito 5.4) — the interval is the fixed `zeroWindowProbeUs`.
+   */
+  private sendZeroWindowProbe(): void {
+    if (!this.canSendSegments()) {
+      return;
+    }
+    if (this.sendQueueHead >= this.sendQueue.length) {
+      return;
+    }
+    const sndNxt = this.sndNxtValue;
+    const head = this.sendQueue[this.sendQueueHead];
+    if (sndNxt === undefined || head === undefined || head.length === 0) {
+      return;
+    }
+    if (this.effectiveSendWindow() > 0) {
+      // The window reopened while the timer was queued: send normally.
+      this.flushSend();
+      return;
+    }
+    this.emit(
+      { ack: true, psh: true },
+      sndNxt,
+      this.rcvNxtValue ?? 0,
+      head.subarray(0, 1),
+    );
+    this.armZeroWindowProbe();
+  }
+
+  /** True while this side may still put payload (not just ACKs) on the wire. */
+  private canSendSegments(): boolean {
+    return (
+      this.stateValue === "ESTABLISHED" ||
+      this.stateValue === "CLOSE_WAIT" ||
+      this.stateValue === "FIN_WAIT_1" ||
+      this.stateValue === "LAST_ACK"
+    );
+  }
+
+  /** Window this socket advertises: the free part of its receive buffer. */
+  private freeReceiveWindow(): number {
+    const free = this.receiveCapacity - this.bufferedBytes();
+    if (free <= 0) {
+      return 0;
+    }
+    return Math.min(free, MAX_WINDOW);
+  }
+
+  /** Bytes held for the application: delivered plus out-of-order buffered. */
+  private bufferedBytes(): number {
+    let total = 0;
+    for (const chunk of this.receivedChunks) {
+      total += chunk.length;
+    }
+    for (const chunk of this.reordered.values()) {
+      total += chunk.length;
+    }
+    return total;
   }
 
   /** Queue the FIN asked for by `close()` and send it if no data is pending. */
@@ -681,10 +911,12 @@ export class TcpSocket {
    * Buffer, trim or deliver the payload of one inbound segment.
    *
    * Returns true when the segment earns an ACK: every payload does, whether
-   * it was in order, out of order, partial or fully duplicated. Bytes starting
-   * exactly at RCV.NXT are delivered (and drain buffered successors); a gap
-   * ahead of RCV.NXT is buffered up to the advertised receive window; the
-   * already-received prefix of a duplicate is trimmed off.
+   * it was in order, out of order, partial or fully duplicated, and a segment
+   * that falls outside the advertised window is dropped but still ACKed (that
+   * ACK is what tells a zero-window prober the window is still closed). Bytes
+   * starting exactly at RCV.NXT are delivered (and drain buffered successors)
+   * while they fit the advertised window; a gap ahead of RCV.NXT is buffered
+   * when it fits; the already-received prefix of a duplicate is trimmed off.
    */
   private acceptPayload(segment: TcpSegment): boolean {
     const payload = segment.payload;
@@ -692,14 +924,18 @@ export class TcpSocket {
       return false;
     }
     const rcvNxt = this.rcvNxtValue ?? 0;
+    const window = this.freeReceiveWindow();
     const offset = (segment.seq - rcvNxt) >>> 0;
     if (offset === 0) {
+      if (payload.length > window) {
+        return true;
+      }
       this.deliverInOrder(payload);
       return true;
     }
-    if (offset < ADVERTISED_WINDOW) {
+    if (offset < 0x8000_0000) {
       if (
-        offset + payload.length <= ADVERTISED_WINDOW &&
+        offset + payload.length <= window &&
         !this.reordered.has(segment.seq)
       ) {
         this.reordered.set(segment.seq, new Uint8Array(payload));
@@ -708,7 +944,10 @@ export class TcpSocket {
     }
     const behind = (rcvNxt - segment.seq) >>> 0;
     if (behind < payload.length) {
-      this.deliverInOrder(payload.subarray(behind));
+      const tail = payload.subarray(behind);
+      if (tail.length <= window) {
+        this.deliverInOrder(tail);
+      }
     }
     return true;
   }
@@ -798,7 +1037,7 @@ export class TcpSocket {
         seq,
         ack,
         flags: { ...NO_FLAGS, ...flags },
-        window: ADVERTISED_WINDOW,
+        window: this.freeReceiveWindow(),
         urgent: 0,
         payload,
       },
@@ -852,6 +1091,7 @@ export class TcpSocket {
   /** Release the port reservation; the TCB keeps its last-known numbers. */
   private release(): void {
     this.cancelTimeWait();
+    this.cancelZeroWindowProbe();
     const binding = this.binding;
     this.binding = undefined;
     binding?.close();
@@ -859,6 +1099,7 @@ export class TcpSocket {
 
   /** Forget the peer and sequence state of a previous connection. */
   private clearTcb(): void {
+    this.cancelZeroWindowProbe();
     this.remoteIpValue = undefined;
     this.remotePortValue = undefined;
     this.issValue = undefined;
@@ -866,6 +1107,7 @@ export class TcpSocket {
     this.sndUnaValue = undefined;
     this.sndNxtValue = undefined;
     this.rcvNxtValue = undefined;
+    this.sndWndValue = undefined;
     this.sendQueue.length = 0;
     this.sendQueueHead = 0;
     this.finQueued = false;

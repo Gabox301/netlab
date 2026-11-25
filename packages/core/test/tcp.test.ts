@@ -1,12 +1,14 @@
 /**
- * TCP machine (F-54/55/56): three-way handshake, simultaneous open, four-way
- * close with TIME_WAIT expiry, RST for closed ports, a handshake through a
- * router, and ordered payload transfer with cumulative ACKs and a fixed send
- * window.
+ * TCP machine (F-54/55/56/57): three-way handshake, simultaneous open,
+ * four-way close with TIME_WAIT expiry, RST for closed ports, a handshake
+ * through a router, ordered payload transfer with cumulative ACKs, and the
+ * sliding window with flow control (advertised window, zero-window probing,
+ * backpressure from a slow receiver).
  *
  * Every run is deterministic: explicit MACs, explicit ISNs and the
  * simulation clock driven by `runAll()` (no timers left) or `runUntil()`
- * (TIME_WAIT still armed).
+ * (TIME_WAIT or a zero-window probe still armed — `runAll()` would spin on a
+ * persist timer that keeps re-arming while the peer window stays closed).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -628,5 +630,229 @@ describe("tcp buffers and cumulative ACKs (F-56)", () => {
     expect(data).toHaveLength(2);
     // The FIN takes the sequence number right after the last data byte.
     expect(fin?.seq).toBe(CLIENT_ISN + 1 + payload.length);
+  });
+});
+
+/**
+ * A(10.0.0.2) — B(10.0.0.3) with an established connection whose server holds
+ * only `capacity` bytes of receive buffer, so the advertised window — not the
+ * fixed 4*MSS send window — is what constrains the client.
+ */
+function flowRig(
+  capacity: number,
+  probeUs?: number,
+): {
+  sim: Simulation;
+  bus: TraceBus;
+  client: TcpSocket;
+  server: TcpSocket;
+} {
+  const { sim, bus, a, b } = directLink();
+  const server = new TcpSocket({
+    host: b,
+    sim,
+    initialSequence: SERVER_ISN,
+    receiveCapacity: capacity,
+  });
+  const client = new TcpSocket({
+    host: a,
+    sim,
+    initialSequence: CLIENT_ISN,
+    ...(probeUs === undefined ? {} : { zeroWindowProbeUs: probeUs }),
+  });
+  server.listen(SERVER_PORT);
+  client.connect(IP_B, SERVER_PORT);
+  sim.runAll();
+  bus.drain();
+  return { sim, bus, client, server };
+}
+
+/** Join the chunks drained from a receiver, in the order they were read. */
+function joined(chunks: Array<Uint8Array>): Uint8Array {
+  return new Uint8Array(chunks.flatMap((chunk) => Array.from(chunk)));
+}
+
+describe("tcp sliding window and flow control (F-57)", () => {
+  test("the sender never exceeds the window the receiver advertised", () => {
+    const capacity = 2 * DEFAULT_MSS;
+    const { sim, bus, client, server } = flowRig(capacity);
+    const start = CLIENT_ISN + 1;
+
+    // The SYN carried the receiver's window: its whole (empty) buffer.
+    expect(server.rcvWnd).toBe(capacity);
+    expect(client.sndWnd).toBe(capacity);
+
+    client.send(patterned(6 * DEFAULT_MSS));
+
+    // Only the advertised window is in flight: 2 MSS, not the 4 of a
+    // fixed 4*MSS send window.
+    expect(client.sndNxt).toBe(start + capacity);
+    const burst = tcpSegments(bus.drain(), "a").filter(
+      (seg) => seg.payload.length > 0,
+    );
+    expect(burst).toHaveLength(2);
+    expect(burst.every((seg) => seg.payload.length === DEFAULT_MSS)).toBe(true);
+
+    // Filling the peer's buffer closes its window and freezes SND.NXT there.
+    sim.runUntil(sim.now + 8 * LATENCY_US);
+    expect(server.rcvWnd).toBe(0);
+    expect(client.sndWnd).toBe(0);
+    expect(client.sndUna).toBe(start + capacity);
+    expect(client.sndNxt).toBe(start + capacity);
+
+    // A window that never reopens keeps the sender parked: no bytes leak out
+    // even after many round trips.
+    sim.runUntil(sim.now + 20 * LATENCY_US);
+    expect(client.sndNxt).toBe(start + capacity);
+  });
+
+  test("advertises zero with a full buffer and reopens on read()", () => {
+    const capacity = 2 * DEFAULT_MSS;
+    const { sim, bus, client, server } = flowRig(capacity);
+    const start = CLIENT_ISN + 1;
+
+    client.send(patterned(4 * DEFAULT_MSS));
+    sim.runUntil(sim.now + 8 * LATENCY_US);
+    expect(server.rcvWnd).toBe(0);
+    // The ACK that filled the buffer is the one that announced the zero window.
+    const filled = tcpSegments(bus.drain(), "b");
+    expect(filled.at(-1)?.window).toBe(0);
+    expect(client.sndWnd).toBe(0);
+
+    // Draining through read() reopens the window and announces it at once.
+    expect(server.read()).toHaveLength(capacity);
+    expect(server.rcvWnd).toBe(capacity);
+    const update = tcpSegments(bus.drain(), "b");
+    expect(update).toHaveLength(1);
+    expect(update[0]?.window).toBe(capacity);
+    expect(update[0]?.ack).toBe(server.rcvNxt ?? 0);
+    expect(update[0]?.payload).toHaveLength(0);
+    expect(update[0]?.flags.fin).toBe(false);
+
+    // The sender learns the reopened window and sends the rest of the data,
+    // which fills the buffer again and closes the window once more.
+    sim.runUntil(sim.now + 8 * LATENCY_US);
+    expect(client.sndNxt).toBe(start + 4 * DEFAULT_MSS);
+    expect(client.sndUna).toBe(start + 4 * DEFAULT_MSS);
+    expect(client.sndWnd).toBe(0);
+    expect(server.rcvWnd).toBe(0);
+    expect(server.read()).toHaveLength(capacity);
+    expect(server.rcvNxt).toBe(start + 4 * DEFAULT_MSS);
+  });
+
+  test("never shrinks the offered window: its right edge only grows", () => {
+    const capacity = 3 * DEFAULT_MSS + 111;
+    const { sim, bus, client, server } = flowRig(capacity);
+
+    client.send(patterned(3 * capacity));
+    sim.runUntil(sim.now + 8 * LATENCY_US);
+    const chunks: Array<Uint8Array> = [server.read()];
+    sim.runUntil(sim.now + 8 * LATENCY_US);
+    chunks.push(server.read());
+    sim.runUntil(sim.now + 8 * LATENCY_US);
+    chunks.push(server.read());
+    sim.runUntil(sim.now + 8 * LATENCY_US);
+
+    const windows = tcpSegments(bus.drain(), "b")
+      .filter((seg) => !seg.flags.syn && !seg.flags.rst)
+      .map((seg) => ({ ack: seg.ack, window: seg.window }));
+    expect(windows.length).toBeGreaterThan(3);
+    // Advertised right edge = ACK + window. A TCP must not move it left: the
+    // only allowed decrease is the zero floor when the buffer is full.
+    for (let i = 1; i < windows.length; i += 1) {
+      const previous = windows[i - 1]?.ack ?? 0;
+      const previousWindow = windows[i - 1]?.window ?? 0;
+      const current = windows[i]?.ack ?? 0;
+      const currentWindow = windows[i]?.window ?? 0;
+      expect(current + currentWindow).toBeGreaterThanOrEqual(
+        previous + previousWindow,
+      );
+    }
+    expect(joined(chunks)).toHaveLength(3 * capacity);
+  });
+
+  test("probes a zero window and resumes when the peer reopens it", () => {
+    const capacity = 2 * DEFAULT_MSS;
+    const probeUs = 100;
+    const { sim, bus, client, server } = flowRig(capacity, probeUs);
+    const start = CLIENT_ISN + 1;
+    const payload = patterned(4 * DEFAULT_MSS);
+
+    client.send(payload);
+    sim.runUntil(sim.now + 6 * LATENCY_US);
+    expect(server.rcvWnd).toBe(0);
+    expect(client.sndNxt).toBe(start + capacity);
+    const stalled = client.sndNxt ?? 0;
+    bus.drain();
+
+    // Closed peer window: the sender probes one byte at SND.NXT, on its own
+    // fixed interval, without spending sequence space.
+    sim.runUntil(sim.now + 4 * probeUs);
+    const probes = tcpSegments(bus.drain(), "a").filter(
+      (seg) => seg.payload.length === 1,
+    );
+    expect(probes.length).toBeGreaterThanOrEqual(2);
+    expect(probes.every((seg) => seg.seq === stalled)).toBe(true);
+    expect(client.sndNxt).toBe(stalled);
+    expect(client.sndUna).toBe(stalled);
+
+    // The probe is outside the zero window, so the receiver drops it and
+    // re-acknowledges its closed window instead of buffering the byte.
+    expect(server.rcvNxt).toBe(start + capacity);
+    expect(server.rcvWnd).toBe(0);
+
+    // Reopening the window lets the transfer resume and finish, byte for byte.
+    const chunks: Array<Uint8Array> = [];
+    let guard = 0;
+    while ((server.rcvNxt ?? 0) !== start + payload.length && guard < 40) {
+      guard += 1;
+      chunks.push(server.read());
+      sim.runUntil(sim.now + 10 * LATENCY_US);
+    }
+    chunks.push(server.read());
+    expect(guard).toBeLessThan(40);
+    expect(server.rcvNxt).toBe(start + payload.length);
+    expect(joined(chunks)).toEqual(payload);
+  });
+
+  test("a slow receiver regulates the sender through SND.NXT", () => {
+    const capacity = 2 * DEFAULT_MSS;
+    const { sim, client, server } = flowRig(capacity);
+    const start = CLIENT_ISN + 1;
+    const payload = patterned(6 * DEFAULT_MSS);
+
+    client.send(payload);
+    expect(client.sndNxt).toBe(start + capacity);
+
+    // Without a reader the sender stalls after one buffer's worth of data.
+    sim.runUntil(sim.now + 10 * LATENCY_US);
+    expect(client.sndNxt).toBe(start + capacity);
+    expect(server.rcvWnd).toBe(0);
+
+    const chunks: Array<Uint8Array> = [];
+    const steps: Array<number> = [(client.sndNxt ?? 0) - start];
+    for (let round = 0; round < 6; round += 1) {
+      chunks.push(server.read());
+      sim.runUntil(sim.now + 6 * LATENCY_US);
+      // The sender may never hold more than the receiver advertised.
+      expect((client.sndNxt ?? 0) - (client.sndUna ?? 0)).toBeLessThanOrEqual(
+        capacity,
+      );
+      steps.push((client.sndNxt ?? 0) - start);
+    }
+    chunks.push(server.read());
+
+    // Every read releases at most one buffer's worth of new data: the sender
+    // advances in steps, driven by the receiver.
+    expect(new Set(steps).size).toBeGreaterThanOrEqual(3);
+    for (let i = 1; i < steps.length; i += 1) {
+      expect(steps[i]).toBeGreaterThanOrEqual(steps[i - 1] ?? 0);
+      expect((steps[i] ?? 0) - (steps[i - 1] ?? 0)).toBeLessThanOrEqual(
+        capacity,
+      );
+    }
+    expect(steps.at(-1)).toBe(payload.length);
+    expect(server.rcvNxt).toBe(start + payload.length);
+    expect(joined(chunks)).toEqual(payload);
   });
 });
