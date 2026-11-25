@@ -1,11 +1,18 @@
 /**
- * Text formatting for `ip addr`, `ip link`, `ip route`, `ip neigh` and
- * `arp -a` (S7). All data comes from Host snapshots; nothing is cached in
- * the shell except the neighbor candidates described in `neighbors.ts`.
+ * Text formatting for `ip addr`, `ip link`, `ip route`, `ip neigh`, `arp -a`
+ * (S7) plus the Fase 4 commands `dig`, `dhclient` and `nc -u`. All data comes
+ * from Host snapshots or application results; nothing is cached here except
+ * the neighbor candidates described in `neighbors.ts`.
  */
 
 import { Ipv4Address } from "@netlab/bytes";
-import { type Host, prefixToMask } from "@netlab/core";
+import {
+  type DhcpClientLease,
+  type DhcpClientState,
+  type DnsResolutionStatus,
+  type Host,
+  prefixToMask,
+} from "@netlab/core";
 import type { NeighborEntry } from "./neighbors";
 
 /** `addr` block: name/state/mtu, MAC, then the optional IPv4 identity. */
@@ -111,4 +118,146 @@ export function formatArpLines(
   return entries.map(
     (entry) => `? (${entry.ip}) at ${entry.mac} [ether] on ${entry.iface}`,
   );
+}
+
+/** Lowercase hex, the only payload form `nc -u` prints or accepts. */
+export function bytesToHex(data: Uint8Array): string {
+  let hex = "";
+  for (const byte of data) {
+    hex += byte.toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+/** Header carried by every `dig` line or `formatDigLines` view. */
+export interface DigView {
+  /** Normalized query name, no trailing dot. */
+  readonly name: string;
+  readonly server: string;
+  readonly port: number;
+  readonly status: DnsResolutionStatus;
+  readonly address: string | undefined;
+  readonly rcode: number | undefined;
+  readonly ttlSeconds: number | undefined;
+  readonly fromCache: boolean;
+  readonly attempts: number;
+  readonly timeoutUs: number;
+  readonly retries: number;
+}
+
+const DIG_STATUS_NAMES: Record<DnsResolutionStatus, string> = {
+  ok: "NOERROR",
+  nxdomain: "NXDOMAIN",
+  timeout: "TIMEOUT",
+  error: "ERROR",
+};
+
+function digStatus(view: DigView): string {
+  const name = DIG_STATUS_NAMES[view.status];
+  if (view.status !== "error" || view.rcode === undefined) {
+    return name;
+  }
+  return `${name} rcode=${view.rcode}`;
+}
+
+/**
+ * `dig` output: a BIND-flavoured, line-oriented report. Only observable
+ * facts are printed — the answer section when one arrived, the status, the
+ * attempt count and the resolver window the command used.
+ */
+export function formatDigLines(view: DigView): Array<string> {
+  const lines = [
+    `; <<>> netlab dig <<>> ${view.name}`,
+    `;; status: ${digStatus(view)}`,
+    `;; attempts: ${view.attempts}`,
+  ];
+  if (view.fromCache) {
+    lines.push(";; cache: hit");
+  }
+  if (view.status === "ok" && view.address !== undefined) {
+    lines.push(";; ANSWER SECTION:");
+    lines.push(
+      `${view.name}.\t${view.ttlSeconds ?? 0}\tIN\tA\t${view.address}`,
+    );
+  }
+  lines.push(`;; SERVER: ${view.server}#${view.port}`);
+  lines.push(`;; timeout: ${view.timeoutUs} us (retries: ${view.retries})`);
+  return lines;
+}
+
+/** One `dhclient` run: the interface, its outcome and the lease it applied. */
+export interface DhclientView {
+  readonly iface: string;
+  readonly state: DhcpClientState;
+  readonly lease: DhcpClientLease | undefined;
+  /** Discover attempts transmitted. */
+  readonly attempts: number;
+}
+
+/** `dhclient` output: DORA start, the applied lease, or the failure. */
+export function formatDhclientLines(view: DhclientView): Array<string> {
+  const lines = [`DHCPDISCOVER on ${view.iface} to 255.255.255.255 port 67`];
+  const lease = view.lease;
+  if (view.state !== "bound" || lease === undefined) {
+    lines.push(
+      `dhclient: no DHCPACK on ${view.iface} after ${view.attempts} attempts`,
+    );
+    return lines;
+  }
+  const mask = lease.mask === undefined ? "" : ` mask ${lease.mask}`;
+  lines.push(
+    `DHCPACK from ${lease.serverId ?? "unknown"}: ` +
+      `bound to ${lease.ip}${mask}`,
+  );
+  if (lease.gateway !== undefined) {
+    lines.push(`  gateway ${lease.gateway}`);
+  }
+  for (const dns of lease.dnsServers) {
+    lines.push(`  nameserver ${dns}`);
+  }
+  const leaseTime =
+    lease.leaseTimeSeconds === undefined
+      ? "unknown"
+      : `${lease.leaseTimeSeconds}`;
+  lines.push(
+    `lease acquired at ${lease.acquiredAt} us, lease time ${leaseTime} s`,
+  );
+  return lines;
+}
+
+/** One datagram collected by `nc -u`, payload already hex-encoded. */
+export interface NcReplyView {
+  readonly srcIp: string;
+  readonly srcPort: number;
+  readonly payload: string;
+}
+
+/** Header carried by `formatNcUdpLines`: what was sent and what came back. */
+export interface NcUdpView {
+  readonly host: string;
+  readonly port: number;
+  /** Sent payload, lowercase hex. */
+  readonly payload: string;
+  readonly replies: ReadonlyArray<NcReplyView>;
+}
+
+function payloadSuffix(hex: string): string {
+  return hex.length === 0 ? "" : `: ${hex}`;
+}
+
+/** `nc -u` output: the target, the sent datagram, every reply and a count. */
+export function formatNcUdpLines(view: NcUdpView): Array<string> {
+  const lines = [
+    `UDP ${view.host}:${view.port}`,
+    `sent ${view.payload.length / 2} bytes${payloadSuffix(view.payload)}`,
+  ];
+  for (const reply of view.replies) {
+    lines.push(
+      `received ${reply.payload.length / 2} bytes from ` +
+        `${reply.srcIp}:${reply.srcPort}${payloadSuffix(reply.payload)}`,
+    );
+  }
+  lines.push(`--- ${view.host}:${view.port} udp ---`);
+  lines.push(`1 sent, ${view.replies.length} received`);
+  return lines;
 }

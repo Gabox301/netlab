@@ -4,9 +4,46 @@
  * decoders here means the worker never imports UI/bundle code.
  */
 
+import type {
+  DhcpMessage,
+  DhcpOption,
+  DnsMessage,
+  DnsRecord,
+  UdpDatagram,
+} from "@netlab/protocols";
 import {
   ARP_OP_REPLY,
   ARP_OP_REQUEST,
+  DHCP_BROADCAST_FLAG,
+  DHCP_CHADDR_LENGTH,
+  DHCP_CLIENT_PORT,
+  DHCP_FILE_LENGTH,
+  DHCP_MESSAGE_ACK,
+  DHCP_MESSAGE_DISCOVER,
+  DHCP_MESSAGE_NAK,
+  DHCP_MESSAGE_OFFER,
+  DHCP_MESSAGE_REQUEST,
+  DHCP_OP_REPLY,
+  DHCP_OP_REQUEST,
+  DHCP_OPTION_DNS,
+  DHCP_OPTION_END,
+  DHCP_OPTION_LEASE_TIME,
+  DHCP_OPTION_MESSAGE_TYPE,
+  DHCP_OPTION_PAD,
+  DHCP_OPTION_REQUESTED_IP,
+  DHCP_OPTION_ROUTER,
+  DHCP_OPTION_SERVER_ID,
+  DHCP_OPTION_SUBNET_MASK,
+  DHCP_OPTIONS_OFFSET,
+  DHCP_SERVER_PORT,
+  DHCP_SNAME_LENGTH,
+  DNS_CLASS_IN,
+  DNS_HEADER_LENGTH,
+  DNS_RCODE_NOERROR,
+  DNS_RCODE_NXDOMAIN,
+  DNS_TYPE_A,
+  dhcpHardwareAddress,
+  dhcpMessageType,
   ETHERNET_HEADER_LENGTH,
   ETHERTYPE_ARP,
   ETHERTYPE_IPV4,
@@ -16,16 +53,21 @@ import {
   ICMP_TYPE_ECHO_REQUEST,
   ICMP_TYPE_TIME_EXCEEDED,
   IPV4_PROTOCOL_ICMP,
+  IPV4_PROTOCOL_UDP,
   parseArp,
+  parseDhcp,
+  parseDns,
   parseEthernet,
   parseIcmp,
   parseIpv4,
+  parseUdp,
   parseVlanTag,
+  UDP_HEADER_LENGTH,
   VLAN_TAG_LENGTH,
 } from "@netlab/protocols";
 import type { WireTrace } from "./sim-protocol";
 
-export type LayerId = "l2" | "l3" | "l4";
+export type LayerId = "l2" | "l3" | "l4" | "l7";
 
 export interface LayerField {
   label: string;
@@ -57,12 +99,20 @@ export interface DecodedFrame {
   dstMac: string;
   srcIp: string | null;
   dstIp: string | null;
-  protocol: "ARP" | "ICMP" | "OTRO";
+  /**
+   * Innermost layer the decoder understood: an application message wins
+   * over its transport (`DNS`/`DHCP` over `UDP`), and ARP/ICMP keep their
+   * own name.
+   */
+  protocol: FrameProtocol;
   summary: string;
   isError: boolean;
   layers: Layer[];
   hex: string;
 }
+
+/** Protocol badge/filter value of a decoded frame (innermost decoded). */
+export type FrameProtocol = "ARP" | "ICMP" | "UDP" | "DNS" | "DHCP" | "OTRO";
 
 export type PacketDir = "tx" | "rx" | "drop";
 
@@ -161,6 +211,435 @@ function parseFailure(
     layers: [],
     hex,
   };
+}
+
+/** DNS service port; the decoder treats a matching payload as a message. */
+const DNS_PORT = 53;
+
+/**
+ * Offset of `chaddr` inside a DHCP message: `op`, `htype`, `hlen`, `hops`,
+ * `xid`, `secs`, `flags` and the four addresses take 28 bytes.
+ */
+const DHCP_CHADDR_OFFSET = 28;
+
+/** Application decode of a UDP payload: the L7 layer plus its summary. */
+interface AppDecode {
+  protocol: "DNS" | "DHCP";
+  summary: string;
+  layer: Layer;
+}
+
+function dnsTypeName(type: number): string {
+  return type === DNS_TYPE_A ? "A" : String(type);
+}
+
+function dnsClassLabel(value: number): string {
+  return value === DNS_CLASS_IN ? `IN (${value})` : String(value);
+}
+
+function dnsRcodeLabel(rcode: number): string {
+  if (rcode === DNS_RCODE_NOERROR) {
+    return "NOERROR";
+  }
+  if (rcode === DNS_RCODE_NXDOMAIN) {
+    return "NXDOMAIN";
+  }
+  return `rcode ${rcode}`;
+}
+
+function dnsFlagsText(flags: DnsMessage["flags"]): string {
+  const bit = (value: boolean): number => (value ? 1 : 0);
+  return [
+    `QR=${bit(flags.qr)}`,
+    `opcode=${flags.opcode}`,
+    `AA=${bit(flags.aa)}`,
+    `TC=${bit(flags.tc)}`,
+    `RD=${bit(flags.rd)}`,
+    `RA=${bit(flags.ra)}`,
+    `rcode=${flags.rcode} (${dnsRcodeLabel(flags.rcode)})`,
+  ].join(" ");
+}
+
+/**
+ * Index just past the name stored at `start`: a compression pointer occupies
+ * 2 bytes on the wire, labels occupy `1 + length` bytes each and the root
+ * label takes 1. Out-of-range input clamps to the end instead of throwing.
+ */
+function dnsNameEnd(data: Uint8Array, start: number): number {
+  let index = start;
+  while (index < data.length) {
+    const length = byteAt(data, index);
+    if (length === 0) {
+      return index + 1;
+    }
+    if ((length & 0xc0) === 0xc0) {
+      return index + 2;
+    }
+    index += 1 + length;
+  }
+  return data.length;
+}
+
+function dnsRecordRows(
+  prefix: string,
+  records: readonly DnsRecord[],
+  data: Uint8Array,
+  base: number,
+  from: number,
+): { rows: LayerField[]; next: number } {
+  const rows: LayerField[] = [];
+  let index = from;
+  records.forEach((record, position) => {
+    const nameStart = index;
+    const typeStart = dnsNameEnd(data, index);
+    const classStart = typeStart + 2;
+    const ttlStart = classStart + 2;
+    const lengthStart = ttlStart + 4;
+    const rdataStart = lengthStart + 2;
+    const rdataEnd =
+      rdataStart + (record.kind === "a" ? 4 : record.rdata.length);
+    const label = `${prefix} ${position + 1}`;
+    rows.push(
+      field(`${label} nombre`, record.name, base + nameStart, base + typeStart),
+      field(
+        `${label} tipo`,
+        `${dnsTypeName(record.type)} (${record.type})`,
+        base + typeStart,
+        base + classStart,
+      ),
+      field(
+        `${label} clase`,
+        dnsClassLabel(record.class),
+        base + classStart,
+        base + ttlStart,
+      ),
+      field(
+        `${label} TTL`,
+        `${record.ttl} s`,
+        base + ttlStart,
+        base + lengthStart,
+      ),
+      field(
+        `${label} rdlength`,
+        `${rdataEnd - rdataStart} B`,
+        base + lengthStart,
+        base + rdataStart,
+      ),
+      field(
+        `${label} rdata`,
+        record.kind === "a" ? record.address : `${record.rdata.length} B`,
+        base + rdataStart,
+        base + rdataEnd,
+      ),
+    );
+    index = rdataEnd;
+  });
+  return { rows, next: index };
+}
+
+/** Decode a port-53 payload as DNS; `null` when the bytes are not a message. */
+function decodeDnsApp(payload: Uint8Array, base: number): AppDecode | null {
+  const parsed = parseDns(payload);
+  if (!parsed.ok) {
+    return null;
+  }
+  const message = parsed.value;
+  const rows: LayerField[] = [
+    field(
+      "id",
+      `0x${message.id.toString(16).padStart(4, "0")}`,
+      base,
+      base + 2,
+    ),
+    field("flags", dnsFlagsText(message.flags), base + 2, base + 4),
+    field("QDCOUNT", String(message.questions.length), base + 4, base + 6),
+    field("ANCOUNT", String(message.answers.length), base + 6, base + 8),
+    field("NSCOUNT", String(message.authorities.length), base + 8, base + 10),
+    field("ARCOUNT", String(message.additionals.length), base + 10, base + 12),
+  ];
+  let index = DNS_HEADER_LENGTH;
+  message.questions.forEach((question, position) => {
+    const nameStart = index;
+    const typeStart = dnsNameEnd(payload, nameStart);
+    const label = `pregunta ${position + 1}`;
+    rows.push(
+      field(
+        `${label} nombre`,
+        question.name,
+        base + nameStart,
+        base + typeStart,
+      ),
+      field(
+        `${label} tipo`,
+        `${dnsTypeName(question.type)} (${question.type})`,
+        base + typeStart,
+        base + typeStart + 2,
+      ),
+      field(
+        `${label} clase`,
+        dnsClassLabel(question.class),
+        base + typeStart + 2,
+        base + typeStart + 4,
+      ),
+    );
+    index = typeStart + 4;
+  });
+  const sections = [
+    ["respuesta", message.answers],
+    ["autoridad", message.authorities],
+    ["adicional", message.additionals],
+  ] as const;
+  for (const [prefix, records] of sections) {
+    const section = dnsRecordRows(prefix, records, payload, base, index);
+    rows.push(...section.rows);
+    index = section.next;
+  }
+
+  const service = message.flags.qr ? "respuesta" : "query";
+  return {
+    protocol: "DNS",
+    summary: dnsSummary(message),
+    layer: {
+      id: "l7",
+      title: `DNS · ${service} · ${payload.length} bytes`,
+      rows,
+      start: base,
+      end: base + payload.length,
+    },
+  };
+}
+
+function dnsSummary(message: DnsMessage): string {
+  const question = message.questions[0];
+  const name = question?.name ?? "—";
+  if (!message.flags.qr) {
+    return `DNS query ${dnsTypeName(question?.type ?? 0)} ${name}`;
+  }
+  if (message.flags.rcode !== DNS_RCODE_NOERROR) {
+    return `DNS respuesta ${dnsRcodeLabel(message.flags.rcode)} ${name}`;
+  }
+  const answer = message.answers[0];
+  if (answer === undefined) {
+    return `DNS respuesta ${name} · sin registros`;
+  }
+  const value =
+    answer.kind === "a" ? answer.address : `${answer.rdata.length} B`;
+  return `DNS respuesta ${dnsTypeName(answer.type)} ${name} → ${value}`;
+}
+
+function dhcpMessageTypeName(type: number): string {
+  if (type === DHCP_MESSAGE_DISCOVER) {
+    return "DISCOVER";
+  }
+  if (type === DHCP_MESSAGE_OFFER) {
+    return "OFFER";
+  }
+  if (type === DHCP_MESSAGE_REQUEST) {
+    return "REQUEST";
+  }
+  if (type === DHCP_MESSAGE_ACK) {
+    return "ACK";
+  }
+  if (type === DHCP_MESSAGE_NAK) {
+    return "NAK";
+  }
+  return `tipo ${type}`;
+}
+
+function dhcpOptionName(code: number): string | null {
+  if (code === DHCP_OPTION_SUBNET_MASK) {
+    return "subnet mask";
+  }
+  if (code === DHCP_OPTION_ROUTER) {
+    return "router";
+  }
+  if (code === DHCP_OPTION_DNS) {
+    return "dns";
+  }
+  if (code === DHCP_OPTION_REQUESTED_IP) {
+    return "requested ip";
+  }
+  if (code === DHCP_OPTION_LEASE_TIME) {
+    return "lease time";
+  }
+  if (code === DHCP_OPTION_MESSAGE_TYPE) {
+    return "message type";
+  }
+  if (code === DHCP_OPTION_SERVER_ID) {
+    return "server id";
+  }
+  return null;
+}
+
+function dhcpOptionValue(
+  option: DhcpOption | undefined,
+  length: number,
+): string {
+  if (option === undefined) {
+    return `${length} B`;
+  }
+  switch (option.kind) {
+    case "subnet-mask":
+      return option.mask;
+    case "router":
+      return option.routers.join(", ");
+    case "dns":
+      return option.servers.join(", ");
+    case "requested-ip":
+      return option.ip;
+    case "lease-time":
+      return `${option.seconds} s`;
+    case "message-type":
+      return `${dhcpMessageTypeName(option.type)} (${option.type})`;
+    case "server-id":
+      return option.id;
+    default:
+      return `${option.data.length} B`;
+  }
+}
+
+/** Walk the TLV area so every option row keeps its wire range. */
+function dhcpOptionRows(
+  message: DhcpMessage,
+  payload: Uint8Array,
+  base: number,
+): LayerField[] {
+  const rows: LayerField[] = [];
+  let index = DHCP_OPTIONS_OFFSET;
+  let position = 0;
+  while (index < payload.length) {
+    const code = byteAt(payload, index);
+    if (code === DHCP_OPTION_PAD) {
+      index += 1;
+      continue;
+    }
+    if (code === DHCP_OPTION_END) {
+      rows.push(field("fin", "end (255)", base + index, base + index + 1));
+      index += 1;
+      break;
+    }
+    const declared = byteAt(payload, index + 1);
+    const valueEnd = Math.min(index + 2 + declared, payload.length);
+    const name = dhcpOptionName(code);
+    const label = name === null ? `opción ${code}` : `opción ${code} (${name})`;
+    const option = message.options[position];
+    position += 1;
+    rows.push(
+      field(
+        label,
+        dhcpOptionValue(option, declared),
+        base + index,
+        base + valueEnd,
+      ),
+    );
+    index = valueEnd;
+  }
+  return rows;
+}
+
+/** Hardware address bytes as `aa:bb:…`, honouring `hlen`. */
+function dhcpChaddrText(message: DhcpMessage): string {
+  const parts: string[] = [];
+  for (const byte of dhcpHardwareAddress(message)) {
+    parts.push(byte.toString(16).padStart(2, "0"));
+  }
+  return parts.length === 0 ? "—" : parts.join(":");
+}
+
+/** Zero-padded `sname`/`file` fields as text; empty fields read as a dash. */
+function dhcpTextField(bytes: Uint8Array): string {
+  let end = bytes.length;
+  while (end > 0 && byteAt(bytes, end - 1) === 0) {
+    end -= 1;
+  }
+  if (end === 0) {
+    return "—";
+  }
+  let text = "";
+  for (let index = 0; index < end; index += 1) {
+    const code = byteAt(bytes, index);
+    text += code >= 32 && code < 127 ? String.fromCharCode(code) : ".";
+  }
+  return text;
+}
+
+/** Decode a port-67/68 payload as DHCP; `null` when the bytes are not one. */
+function decodeDhcpApp(payload: Uint8Array, base: number): AppDecode | null {
+  const parsed = parseDhcp(payload);
+  if (!parsed.ok) {
+    return null;
+  }
+  const message = parsed.value;
+  const type = dhcpMessageType(message.options);
+  const service = type === undefined ? null : dhcpMessageTypeName(type);
+  const prefix = service === null ? "DHCP" : `DHCP ${service}`;
+  const xid = `0x${message.xid.toString(16).padStart(8, "0")}`;
+  const opName =
+    message.op === DHCP_OP_REQUEST
+      ? "BOOTREQUEST"
+      : message.op === DHCP_OP_REPLY
+        ? "BOOTREPLY"
+        : "?";
+  const broadcast =
+    (message.flags & DHCP_BROADCAST_FLAG) !== 0 ? " (broadcast)" : "";
+  // BOOTP body: `op`..`giaddr` take 28 bytes, then the fixed-width fields.
+  const chaddrStart = base + DHCP_CHADDR_OFFSET;
+  const snameStart = chaddrStart + DHCP_CHADDR_LENGTH;
+  const fileStart = snameStart + DHCP_SNAME_LENGTH;
+  const cookieStart = fileStart + DHCP_FILE_LENGTH;
+  const rows: LayerField[] = [
+    field("op", `${message.op} (${opName})`, base, base + 1),
+    field("htype", `${message.htype} (Ethernet)`, base + 1, base + 2),
+    field("hlen", String(message.hlen), base + 2, base + 3),
+    field("hops", String(message.hops), base + 3, base + 4),
+    field("xid", xid, base + 4, base + 8),
+    field("secs", `${message.secs} s`, base + 8, base + 10),
+    field(
+      "flags",
+      `0x${message.flags.toString(16).padStart(4, "0")}${broadcast}`,
+      base + 10,
+      base + 12,
+    ),
+    field("ciaddr", message.ciaddr, base + 12, base + 16),
+    field("yiaddr", message.yiaddr, base + 16, base + 20),
+    field("siaddr", message.siaddr, base + 20, base + 24),
+    field("giaddr", message.giaddr, base + 24, base + 28),
+    field("chaddr", dhcpChaddrText(message), chaddrStart, snameStart),
+    field("sname", dhcpTextField(message.sname), snameStart, fileStart),
+    field("file", dhcpTextField(message.file), fileStart, cookieStart),
+    field("cookie", "0x63825363", cookieStart, base + DHCP_OPTIONS_OFFSET),
+    ...dhcpOptionRows(message, payload, base),
+  ];
+  const assigned =
+    message.yiaddr === "0.0.0.0" ? "" : ` · yiaddr ${message.yiaddr}`;
+  return {
+    protocol: "DHCP",
+    summary: `${prefix} xid=${xid}${assigned}`,
+    layer: {
+      id: "l7",
+      title: `DHCP · ${service ?? "sin tipo"} · ${payload.length} bytes`,
+      rows,
+      start: base,
+      end: base + payload.length,
+    },
+  };
+}
+
+/**
+ * Pick the application decoder for a UDP datagram. DNS wins over DHCP, and a
+ * payload the app codec rejects leaves the frame as plain UDP: the innermost
+ * layer that decoded is what the badge shows.
+ */
+function decodeUdpApp(datagram: UdpDatagram, base: number): AppDecode | null {
+  if (datagram.srcPort === DNS_PORT || datagram.dstPort === DNS_PORT) {
+    return decodeDnsApp(datagram.payload, base);
+  }
+  const dhcp = isDhcpPort(datagram.srcPort) || isDhcpPort(datagram.dstPort);
+  return dhcp ? decodeDhcpApp(datagram.payload, base) : null;
+}
+
+function isDhcpPort(port: number): boolean {
+  return port === DHCP_SERVER_PORT || port === DHCP_CLIENT_PORT;
 }
 
 /**
@@ -382,6 +861,71 @@ function decodeFrameUncached(hex: string): DecodedFrame {
     dstIp: header.dst.toString(),
     hex,
   };
+
+  if (header.protocol === IPV4_PROTOCOL_UDP) {
+    // The IPv4 addresses are passed in so `parseUdp` verifies the checksum
+    // against the pseudo-header; a bad one fails the frame like ICMP does.
+    const udp = parseUdp(ipPayload, { src: header.src, dst: header.dst });
+    if (!udp.ok) {
+      return parseFailure(bytes, hex, udp.error.message);
+    }
+    const datagram = udp.value;
+    const udpBase = ipEnd;
+    const udpEnd = udpBase + datagram.length;
+    const payloadBase = udpBase + UDP_HEADER_LENGTH;
+    const udpChecksum = u16At(ipPayload, 6);
+    // An app layer owns the payload bytes, so the L4 layer keeps just its
+    // header: layers stay disjoint and a payload byte selects the DNS/DHCP
+    // field instead of the generic `datos` row.
+    const app = decodeUdpApp(datagram, payloadBase);
+    const l4End = app === null ? udpEnd : payloadBase;
+    const l4rows: Array<LayerField> = [
+      field("puerto origen", String(datagram.srcPort), udpBase, udpBase + 2),
+      field(
+        "puerto destino",
+        String(datagram.dstPort),
+        udpBase + 2,
+        udpBase + 4,
+      ),
+      field("longitud", `${datagram.length} B`, udpBase + 4, udpBase + 6),
+      field(
+        "checksum",
+        `${checksumText(udpChecksum)} · válido`,
+        udpBase + 6,
+        udpBase + 8,
+      ),
+    ];
+    if (app === null) {
+      l4rows.push(
+        field("datos", `${datagram.payload.length} B`, payloadBase, udpEnd),
+      );
+    }
+    layers.push({
+      id: "l4",
+      title: `UDP · ${l4End - udpBase} bytes`,
+      rows: l4rows,
+      start: udpBase,
+      end: l4End,
+    });
+
+    if (app !== null) {
+      layers.push(app.layer);
+      return {
+        ...frameBase,
+        protocol: app.protocol,
+        summary: app.summary,
+        isError: false,
+        layers,
+      };
+    }
+    return {
+      ...frameBase,
+      protocol: "UDP",
+      summary: `UDP ${datagram.srcPort} → ${datagram.dstPort} · ${datagram.payload.length} B`,
+      isError: false,
+      layers,
+    };
+  }
 
   if (header.protocol !== IPV4_PROTOCOL_ICMP) {
     return {

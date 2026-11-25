@@ -3,6 +3,7 @@ import { onMount } from "svelte";
 import {
   buildHexLines,
   buildPackets,
+  type FrameProtocol,
   type HexToken,
   type LayerField,
   type LayerId,
@@ -112,6 +113,9 @@ function syncSelectionToClock(): void {
 let tab = $state<TabId>("inspector");
 let showArp = $state(true);
 let showIcmp = $state(true);
+let showUdp = $state(true);
+let showDns = $state(true);
+let showDhcp = $state(true);
 let showOtro = $state(true);
 let hoverLayer = $state<LayerId | null>(null);
 let selectedField = $state<{ layer: LayerId; row: number } | null>(null);
@@ -140,16 +144,7 @@ const allTraces = $derived([...(result?.traces ?? []), ...sessionTraces]);
 const traceTotal = $derived(allTraces.length);
 const packets = $derived(buildPackets(allTraces));
 const visiblePackets = $derived(
-  packets.filter((packet) => {
-    const protocol = packet.decoded.protocol;
-    if (protocol === "ARP") {
-      return showArp;
-    }
-    if (protocol === "ICMP") {
-      return showIcmp;
-    }
-    return showOtro;
-  }),
+  packets.filter((packet) => protocolVisible(packet.decoded.protocol)),
 );
 const selectedPacket = $derived(
   packets.find((packet) => packet.traceIndex === selectedTraceIndex) ?? null,
@@ -190,15 +185,7 @@ const toDevice = $derived(
 );
 const flights = $derived(buildFlights(allTraces));
 const visibleFlights = $derived(
-  flights.filter((flight) => {
-    if (flight.protocol === "ARP") {
-      return showArp;
-    }
-    if (flight.protocol === "ICMP") {
-      return showIcmp;
-    }
-    return showOtro;
-  }),
+  flights.filter((flight) => protocolVisible(flight.protocol)),
 );
 const inFlights = $derived(
   visibleFlights.filter((flight) => {
@@ -237,13 +224,38 @@ function flightClass(flight: Flight): string {
   if (flight.outcome === "dropped") {
     return "flt-dropped";
   }
-  if (flight.protocol === "ARP") {
-    return "flt-arp";
+  switch (flight.protocol) {
+    case "ARP":
+      return "flt-arp";
+    case "ICMP":
+      return "flt-icmp";
+    case "UDP":
+      return "flt-udp";
+    case "DNS":
+      return "flt-dns";
+    case "DHCP":
+      return "flt-dhcp";
+    default:
+      return "flt-otro";
   }
-  if (flight.protocol === "ICMP") {
-    return "flt-icmp";
+}
+
+/** Chip filter: every protocol has its own toggle (T7 adds expressions). */
+function protocolVisible(protocol: FrameProtocol): boolean {
+  switch (protocol) {
+    case "ARP":
+      return showArp;
+    case "ICMP":
+      return showIcmp;
+    case "UDP":
+      return showUdp;
+    case "DNS":
+      return showDns;
+    case "DHCP":
+      return showDhcp;
+    default:
+      return showOtro;
   }
-  return "flt-otro";
 }
 const hexLines = $derived(
   selectedPacket
@@ -749,7 +761,19 @@ function badgeClass(packet: PacketRow): string {
   if (packet.decoded.protocol === "ARP") {
     return "b-arp";
   }
-  return packet.decoded.isError ? "b-err" : "b-echo";
+  if (packet.decoded.isError) {
+    return "b-err";
+  }
+  switch (packet.decoded.protocol) {
+    case "UDP":
+      return "b-udp";
+    case "DNS":
+      return "b-dns";
+    case "DHCP":
+      return "b-dhcp";
+    default:
+      return "b-echo";
+  }
 }
 
 function ipLabel(iface: InterfaceSnapshot): string {
@@ -935,6 +959,27 @@ function isNodeActive(id: string): boolean {
             onclick={() => (showIcmp = !showIcmp)}
           >
             ICMP
+          </button>
+          <button
+            type="button"
+            aria-pressed={showUdp}
+            onclick={() => (showUdp = !showUdp)}
+          >
+            UDP
+          </button>
+          <button
+            type="button"
+            aria-pressed={showDns}
+            onclick={() => (showDns = !showDns)}
+          >
+            DNS
+          </button>
+          <button
+            type="button"
+            aria-pressed={showDhcp}
+            onclick={() => (showDhcp = !showDhcp)}
+          >
+            DHCP
           </button>
           <button
             type="button"
@@ -1271,6 +1316,7 @@ function isNodeActive(id: string): boolean {
     --l2: #3dc8ff;
     --l3: #ff4d3d;
     --l4: #ffd23d;
+    --l7: #c58cff;
     --disp: Impact, "Arial Narrow", "Arial Narrow Bold", sans-serif;
     --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   }
@@ -1519,6 +1565,18 @@ function isNodeActive(id: string): boolean {
     fill: var(--ok);
   }
 
+  .flt-udp {
+    fill: var(--l4);
+  }
+
+  .flt-dns {
+    fill: var(--l7);
+  }
+
+  .flt-dhcp {
+    fill: var(--mut);
+  }
+
   .flt-otro {
     fill: var(--mut);
   }
@@ -1645,6 +1703,18 @@ function isNodeActive(id: string): boolean {
 
   .b-arp {
     color: var(--warn);
+  }
+
+  .b-udp {
+    color: var(--l4);
+  }
+
+  .b-dns {
+    color: var(--l7);
+  }
+
+  .b-dhcp {
+    color: var(--mut);
   }
 
   .b-err {
@@ -1797,6 +1867,10 @@ function isNodeActive(id: string): boolean {
 
   .hex b.l4 {
     color: var(--l4);
+  }
+
+  .hex b.l7 {
+    color: var(--l7);
   }
 
   .hex b.pad {

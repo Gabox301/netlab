@@ -14,7 +14,7 @@
  * still show it through its visual floor without touching virtual time.
  */
 
-import { decodeFrame } from "./decode";
+import { decodeFrame, type FrameProtocol } from "./decode";
 import type { EndpointSide, WireTrace } from "./sim-protocol";
 
 export type FlightOutcome = "delivered" | "dropped";
@@ -24,7 +24,8 @@ export interface Flight {
   from: EndpointSide;
   startUs: number;
   endUs: number;
-  protocol: "ARP" | "ICMP" | "OTRO";
+  /** Innermost decoded protocol of the frame, used for coloring/filters. */
+  protocol: FrameProtocol;
   hex: string;
   outcome: FlightOutcome;
   dropReason?: string;

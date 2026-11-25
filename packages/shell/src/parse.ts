@@ -21,6 +21,11 @@ export const DEFAULT_PING_TTL = 64;
 export const MAX_PING_SIZE = 65507;
 /** Largest request count: sequences are 16-bit. */
 export const MAX_PING_COUNT = 65535;
+/** Largest UDP payload `nc -u` accepts: the IPv4 datagram limit. */
+export const MAX_NC_PAYLOAD_BYTES = 65507;
+
+/** One DNS label: alphanumeric, internal hyphens, 1..63 characters. */
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
 export interface IpAddrShowCommand {
   readonly kind: "ip.addr.show";
@@ -71,6 +76,28 @@ export interface TracerouteCommand {
   readonly dst: string;
 }
 
+export interface DigCommand {
+  readonly kind: "dig";
+  /** Normalized query name, no trailing dot. */
+  readonly name: string;
+  /** `@SERVER` override; absent means the shell's default resolver. */
+  readonly server?: string;
+}
+
+export interface DhclientCommand {
+  readonly kind: "dhclient";
+  /** Interface to configure; absent means the first unconfigured one. */
+  readonly iface?: string;
+}
+
+export interface NcUdpCommand {
+  readonly kind: "nc.udp";
+  readonly host: string;
+  readonly port: number;
+  /** Lowercase hex payload; empty sends a zero-length datagram. */
+  readonly payload: string;
+}
+
 export interface HelpCommand {
   readonly kind: "help";
 }
@@ -86,6 +113,9 @@ export type ShellCommand =
   | ArpCommand
   | PingCommand
   | TracerouteCommand
+  | DigCommand
+  | DhclientCommand
+  | NcUdpCommand
   | HelpCommand;
 
 /** Parse outcome; failures are data, not exceptions. */
@@ -132,6 +162,22 @@ function parseInteger(text: string | undefined): number | undefined {
     return undefined;
   }
   return Number.parseInt(text, 10);
+}
+
+/**
+ * Accept the names `dig` can actually send: dotted labels, at most 253
+ * characters, no empty label. A trailing dot is allowed and ignored.
+ */
+function isDnsName(text: string): boolean {
+  const trimmed = text.endsWith(".") ? text.slice(0, -1) : text;
+  if (trimmed.length === 0 || trimmed.length > 253) {
+    return false;
+  }
+  return trimmed
+    .split(".")
+    .every(
+      (label) => label.length <= 63 && DNS_LABEL.test(label.toLowerCase()),
+    );
 }
 
 /** Optional `[dev] <iface>` filter shared by the show commands. */
@@ -488,6 +534,149 @@ function parseTraceroute(tokens: ReadonlyArray<string>): ShellParseResult {
   return ok({ kind: "traceroute", dst });
 }
 
+/**
+ * `dig [@SERVER] NAME [A]`: one A query against an explicit or default
+ * resolver. Every other record type is rejected as unsupported.
+ */
+function parseDig(tokens: ReadonlyArray<string>): ShellParseResult {
+  const usage = "usage: dig [@SERVER] NAME [A]";
+  let server: string | undefined;
+  let name: string | undefined;
+  let type: string | undefined;
+  let index = 1;
+  while (index < tokens.length) {
+    const token = tokens[index] ?? "";
+    index += 1;
+    if (token.startsWith("@")) {
+      if (server !== undefined) {
+        return fail(
+          "unexpected_argument",
+          "dig",
+          `unexpected argument: ${token}`,
+        );
+      }
+      const value = token.slice(1);
+      if (value.length === 0) {
+        return fail("missing_argument", "dig", "@ needs a server address");
+      }
+      server = value;
+      continue;
+    }
+    if (token.startsWith("-")) {
+      return fail("unknown_flag", "dig", `unknown flag: ${token}`);
+    }
+    if (name === undefined) {
+      name = token;
+      continue;
+    }
+    if (type === undefined) {
+      type = token;
+      continue;
+    }
+    return fail("unexpected_argument", "dig", `unexpected argument: ${token}`);
+  }
+  if (name === undefined) {
+    return fail("missing_argument", "dig", usage);
+  }
+  if (server !== undefined && !isIpv4(server)) {
+    return fail(
+      "invalid_argument",
+      "dig",
+      `invalid DNS server address: ${server}`,
+    );
+  }
+  if (!isDnsName(name)) {
+    return fail("invalid_argument", "dig", `invalid name: ${name}`);
+  }
+  if (type !== undefined && type.toLowerCase() !== "a") {
+    return fail("unsupported", "dig", `only A records are supported: ${type}`);
+  }
+  const normalized = name.endsWith(".") ? name.slice(0, -1) : name;
+  return server === undefined
+    ? ok({ kind: "dig", name: normalized })
+    : ok({ kind: "dig", name: normalized, server });
+}
+
+/** `dhclient [IFACE]`: DORA on one interface, no flags to interpret. */
+function parseDhclient(tokens: ReadonlyArray<string>): ShellParseResult {
+  const iface = tokens[1];
+  if (iface === undefined) {
+    return ok({ kind: "dhclient" });
+  }
+  if (iface.startsWith("-")) {
+    return fail("unknown_flag", "dhclient", `unknown flag: ${iface}`);
+  }
+  if (tokens.length > 2) {
+    return fail(
+      "unexpected_argument",
+      "dhclient",
+      `unexpected argument: ${tokens[2] ?? ""}`,
+    );
+  }
+  return ok({ kind: "dhclient", iface });
+}
+
+/** `nc -u HOST PORT [HEX]`: only the UDP mode is modelled. */
+function parseNc(tokens: ReadonlyArray<string>): ShellParseResult {
+  const usage = "usage: nc -u HOST PORT [HEX]";
+  const mode = tokens[1];
+  if (mode === undefined) {
+    return fail("missing_argument", "nc", usage);
+  }
+  if (mode !== "-u") {
+    if (mode.startsWith("-")) {
+      return fail("unknown_flag", "nc", `unknown flag: ${mode}`);
+    }
+    return fail("unsupported", "nc", "only UDP mode is supported: nc -u");
+  }
+  const host = tokens[2];
+  const portText = tokens[3];
+  if (host === undefined || portText === undefined) {
+    return fail("missing_argument", "nc", usage);
+  }
+  if (tokens.length > 5) {
+    return fail(
+      "unexpected_argument",
+      "nc",
+      `unexpected argument: ${tokens[5] ?? ""}`,
+    );
+  }
+  if (host.startsWith("-")) {
+    return fail("unknown_flag", "nc", `unknown flag: ${host}`);
+  }
+  if (!isIpv4(host)) {
+    return fail("invalid_argument", "nc", `invalid host: ${host}`);
+  }
+  const port = parseInteger(portText);
+  if (port === undefined || port < 1 || port > 0xffff) {
+    return fail("invalid_argument", "nc", `port must be 1..65535: ${portText}`);
+  }
+  const payload = tokens[4] ?? "";
+  if (!/^[0-9a-fA-F]*$/.test(payload)) {
+    return fail("invalid_argument", "nc", `payload must be hex: ${payload}`);
+  }
+  if (payload.length % 2 !== 0) {
+    return fail(
+      "invalid_argument",
+      "nc",
+      `payload needs an even number of hex digits: ${payload}`,
+    );
+  }
+  if (payload.length / 2 > MAX_NC_PAYLOAD_BYTES) {
+    return fail(
+      "invalid_argument",
+      "nc",
+      `payload must be at most ${MAX_NC_PAYLOAD_BYTES} bytes`,
+    );
+  }
+  return ok({
+    kind: "nc.udp",
+    host,
+    port,
+    payload: payload.toLowerCase(),
+  });
+}
+
 function parse(line: string): ShellParseResult {
   const trimmed = line.trim();
   if (trimmed.length === 0) {
@@ -502,6 +691,12 @@ function parse(line: string): ShellParseResult {
       return parsePing(tokens);
     case "traceroute":
       return parseTraceroute(tokens);
+    case "dig":
+      return parseDig(tokens);
+    case "dhclient":
+      return parseDhclient(tokens);
+    case "nc":
+      return parseNc(tokens);
     case "arp":
       return parseArp(tokens);
     case "help":

@@ -12,8 +12,16 @@
  * replaces those properties after construction takes ownership back.
  */
 
+import { Ipv4Address } from "@netlab/bytes";
 import {
+  DEFAULT_DHCP_RETRIES,
+  DEFAULT_DHCP_TIMEOUT_US,
+  DEFAULT_DNS_PORT,
+  DEFAULT_DNS_RETRIES,
+  DEFAULT_DNS_TIMEOUT_US,
   DEFAULT_IPV4_MTU,
+  DhcpClient,
+  DnsResolver,
   type Host,
   type HostEchoReply,
   type HostIcmpError,
@@ -29,10 +37,14 @@ import {
 } from "@netlab/protocols";
 import { ShellCommandError, shellError } from "./errors";
 import {
+  bytesToHex,
   formatAddressLines,
   formatArpLines,
+  formatDhclientLines,
+  formatDigLines,
   formatIpNeighLines,
   formatLinkLines,
+  formatNcUdpLines,
   formatRouteLines,
 } from "./format";
 import {
@@ -43,6 +55,9 @@ import {
   sortNeighborEntries,
 } from "./neighbors";
 import {
+  type DhclientCommand,
+  type DigCommand,
+  type NcUdpCommand,
   type PingCommand,
   parseCommandLine,
   type ShellCommand,
@@ -57,6 +72,19 @@ export const DEFAULT_PING_INTERVAL_US = 1_000_000;
 export const DEFAULT_TRACEROUTE_TIMEOUT_US = 1_000_000;
 /** TTL budgets tried by `traceroute` before giving up. */
 export const DEFAULT_TRACEROUTE_MAX_HOPS = 30;
+/** Virtual wait per `dig` attempt; mirrors the core resolver default. */
+export const DEFAULT_DIG_TIMEOUT_US = DEFAULT_DNS_TIMEOUT_US;
+/** Retransmissions per `dig`; mirrors the core resolver default. */
+export const DEFAULT_DIG_RETRIES = DEFAULT_DNS_RETRIES;
+/** Virtual wait per `dhclient` attempt; mirrors the core client default. */
+export const DEFAULT_DHCLIENT_TIMEOUT_US = DEFAULT_DHCP_TIMEOUT_US;
+/** Retransmissions per `dhclient`; mirrors the core client default. */
+export const DEFAULT_DHCLIENT_RETRIES = DEFAULT_DHCP_RETRIES;
+/** Virtual window `nc -u` keeps listening for replies. */
+export const DEFAULT_NC_TIMEOUT_US = 1_000_000;
+
+/** First port the shell binds for its own UDP sockets (dynamic range). */
+const UDP_PORT_START = 49200;
 
 /** Echo data size used by traceroute probes. */
 const TRACEROUTE_SIZE = 32;
@@ -70,6 +98,9 @@ const HELP_LINES: ReadonlyArray<string> = [
   "arp - show ARP cache",
   "ping [-c COUNT] [-s SIZE] [-t TTL] DST - echo requests",
   "traceroute DST - trace hops",
+  "dig [@SERVER] NAME [A] - resolve a name over DNS",
+  "dhclient [IFACE] - obtain an address over DHCP",
+  "nc -u HOST PORT [HEX] - send a UDP datagram and print replies",
   "help - this list",
 ];
 
@@ -94,6 +125,24 @@ export interface ShellOptions {
   tracerouteTimeoutUs?: number;
   /** Maximum TTL tried by traceroute (1..255). */
   tracerouteMaxHops?: number;
+  /**
+   * Resolver `dig` uses when the command has no `@SERVER`. Defaults to the
+   * gateway of the first configured interface, matching the DNS server a
+   * host learns over DHCP.
+   */
+  dnsServer?: string;
+  /** Resolver port for `dig`; default {@link DEFAULT_DNS_PORT}. */
+  dnsPort?: number;
+  /** Virtual wait per `dig` attempt. */
+  digTimeoutUs?: number;
+  /** Retransmissions per `dig` (total attempts = retries + 1). */
+  digRetries?: number;
+  /** Virtual wait per `dhclient` attempt. */
+  dhcpTimeoutUs?: number;
+  /** Retransmissions per `dhclient` (total attempts = retries + 1). */
+  dhcpRetries?: number;
+  /** Virtual window `nc -u` keeps collecting replies. */
+  ncTimeoutUs?: number;
 }
 
 interface ProbeOutcome {
@@ -145,6 +194,37 @@ function checkMaxHops(value: number): number {
     );
   }
   return value;
+}
+
+function checkPort(name: string, value: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > 0xffff) {
+    throw new RangeError(`${name} must be an integer 0..65535: ${value}`);
+  }
+  return value;
+}
+
+function checkRetries(name: string, value: number): number {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new RangeError(`${name} must be a non-negative integer: ${value}`);
+  }
+  return value;
+}
+
+function checkAddress(name: string, value: string): string {
+  try {
+    return Ipv4Address.parse(value).toString();
+  } catch {
+    throw new RangeError(`${name} must be an IPv4 address: ${value}`);
+  }
+}
+
+/** Decode the already-validated lowercase hex payload of `nc -u`. */
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < bytes.length; index++) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
 }
 
 function byteAt(data: Uint8Array, index: number): number {
@@ -214,11 +294,21 @@ export class Shell {
   private readonly pingIntervalUs: number;
   private readonly tracerouteTimeoutUs: number;
   private readonly tracerouteMaxHops: number;
+  private readonly dnsServer: string | undefined;
+  private readonly dnsPort: number;
+  private readonly digTimeoutUs: number;
+  private readonly digRetries: number;
+  private readonly dhcpTimeoutUs: number;
+  private readonly dhcpRetries: number;
+  private readonly ncTimeoutUs: number;
   private readonly neighbors: NeighborProvider;
   /** Candidate neighbors learned from successful sends, per interface. */
   private readonly peers = new Map<string, Set<string>>();
+  /** One stub resolver per server, so its TTL cache survives the command. */
+  private readonly resolvers = new Map<string, DnsResolver>();
   private activeProbe: ActiveProbe | undefined;
   private identifierSeed = 0x4e00;
+  private udpPortSeed = UDP_PORT_START - 1;
 
   constructor(options: ShellOptions) {
     this.host = options.host;
@@ -238,6 +328,31 @@ export class Shell {
     );
     this.tracerouteMaxHops = checkMaxHops(
       options.tracerouteMaxHops ?? DEFAULT_TRACEROUTE_MAX_HOPS,
+    );
+    this.dnsServer =
+      options.dnsServer === undefined
+        ? undefined
+        : checkAddress("dnsServer", options.dnsServer);
+    this.dnsPort = checkPort("dnsPort", options.dnsPort ?? DEFAULT_DNS_PORT);
+    this.digTimeoutUs = checkDuration(
+      "digTimeoutUs",
+      options.digTimeoutUs ?? DEFAULT_DIG_TIMEOUT_US,
+    );
+    this.digRetries = checkRetries(
+      "digRetries",
+      options.digRetries ?? DEFAULT_DIG_RETRIES,
+    );
+    this.dhcpTimeoutUs = checkDuration(
+      "dhcpTimeoutUs",
+      options.dhcpTimeoutUs ?? DEFAULT_DHCLIENT_TIMEOUT_US,
+    );
+    this.dhcpRetries = checkRetries(
+      "dhcpRetries",
+      options.dhcpRetries ?? DEFAULT_DHCLIENT_RETRIES,
+    );
+    this.ncTimeoutUs = checkDuration(
+      "ncTimeoutUs",
+      options.ncTimeoutUs ?? DEFAULT_NC_TIMEOUT_US,
     );
     this.neighbors =
       options.neighbors ??
@@ -312,6 +427,12 @@ export class Shell {
         return this.ping(command);
       case "traceroute":
         return this.traceroute(command);
+      case "dig":
+        return this.dig(command);
+      case "dhclient":
+        return this.dhclient(command);
+      case "nc.udp":
+        return this.ncUdp(command);
       case "help":
         return [...HELP_LINES];
       default:
@@ -436,6 +557,186 @@ export class Shell {
       lines.push(`${prefix}  *`);
     }
     return lines;
+  }
+
+  /**
+   * Resolve one A record with the shared {@link DnsResolver} for `server`.
+   * The resolver is kept per server so its TTL cache survives the command,
+   * exactly like a host stub resolver.
+   */
+  private dig(command: DigCommand): Array<string> {
+    const server = command.server ?? this.defaultDnsServer();
+    const resolution = this.resolverFor(server).resolve(command.name);
+    return formatDigLines({
+      name: resolution.name,
+      server,
+      port: this.dnsPort,
+      status: resolution.status,
+      address: resolution.address,
+      rcode: resolution.rcode,
+      ttlSeconds: resolution.ttlSeconds,
+      fromCache: resolution.fromCache,
+      attempts: resolution.attempts,
+      timeoutUs: this.digTimeoutUs,
+      retries: this.digRetries,
+    });
+  }
+
+  /**
+   * Run DORA on one interface and report the lease.
+   *
+   * The virtual clock advances event by event (never on wall-clock time)
+   * until the client is bound, failed, or the retry budget is exhausted: a
+   * single `runUntil()` would pin the clock to the whole budget even when
+   * the Ack arrives immediately.
+   */
+  private dhclient(command: DhclientCommand): Array<string> {
+    const iface = this.dhcpInterface(command.iface);
+    const client = new DhcpClient({
+      host: this.host,
+      sim: this.sim,
+      iface,
+      timeoutUs: this.dhcpTimeoutUs,
+      retries: this.dhcpRetries,
+    });
+    const deadline = this.sim.now + this.dhcpTimeoutUs * (this.dhcpRetries + 1);
+    let state = client.state;
+    let lease = client.lease;
+    let attempts = client.stats.discovers;
+    try {
+      client.start();
+      while (
+        client.state !== "bound" &&
+        client.state !== "failed" &&
+        this.sim.now <= deadline
+      ) {
+        if (!this.sim.step() || this.sim.now > deadline) {
+          break;
+        }
+      }
+      state = client.state;
+      lease = client.lease;
+      attempts = client.stats.discovers;
+    } finally {
+      client.close();
+    }
+    return formatDhclientLines({ iface, state, lease, attempts });
+  }
+
+  /**
+   * Send one UDP datagram from an ephemeral socket and collect the replies
+   * that arrive before the virtual timeout, mirroring {@link runProbe}.
+   */
+  private ncUdp(command: NcUdpCommand): Array<string> {
+    const deadline = this.sim.now + this.ncTimeoutUs;
+    const replies: Array<{
+      srcIp: string;
+      srcPort: number;
+      payload: Uint8Array;
+    }> = [];
+    const srcPort = this.nextUdpPort();
+    const socket = this.host.bindUdp(srcPort, (datagram) => {
+      if (this.sim.now > deadline) {
+        return;
+      }
+      replies.push({
+        srcIp: datagram.srcIp,
+        srcPort: datagram.srcPort,
+        payload: datagram.payload,
+      });
+    });
+    try {
+      this.host.sendUdp(
+        command.host,
+        command.port,
+        hexToBytes(command.payload),
+        { srcPort },
+      );
+      this.sim.runUntil(deadline);
+    } finally {
+      socket.close();
+    }
+    return formatNcUdpLines({
+      host: command.host,
+      port: command.port,
+      payload: command.payload,
+      replies: replies.map((reply) => ({
+        srcIp: reply.srcIp,
+        srcPort: reply.srcPort,
+        payload: bytesToHex(reply.payload),
+      })),
+    });
+  }
+
+  /** `@server`, then the configured resolver, then the gateway on port 53. */
+  private defaultDnsServer(): string {
+    if (this.dnsServer !== undefined) {
+      return this.dnsServer;
+    }
+    for (const iface of this.host.interfaces) {
+      const config = this.host.getIpConfig(iface.name);
+      if (config?.gateway !== undefined) {
+        return config.gateway.toString();
+      }
+    }
+    throw new ShellCommandError(
+      shellError(
+        "invalid_argument",
+        "dig",
+        "dig needs a DNS server: use dig @SERVER, set the dnsServer " +
+          "option or configure a gateway",
+      ),
+    );
+  }
+
+  private resolverFor(server: string): DnsResolver {
+    const existing = this.resolvers.get(server);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const resolver = new DnsResolver({
+      host: this.host,
+      sim: this.sim,
+      serverIp: server,
+      port: this.dnsPort,
+      timeoutUs: this.digTimeoutUs,
+      retries: this.digRetries,
+      srcPort: this.nextUdpPort(),
+    });
+    this.resolvers.set(server, resolver);
+    return resolver;
+  }
+
+  /**
+   * Explicit interface, else the first one without an address (the case
+   * `dhclient` exists for), else the first interface at all.
+   */
+  private dhcpInterface(name: string | undefined): string {
+    if (name !== undefined) {
+      this.requireInterface(name, "dhclient");
+      return name;
+    }
+    const unconfigured = this.host.interfaces.find(
+      (iface) => this.host.getIpConfig(iface.name) === undefined,
+    );
+    const chosen = unconfigured ?? this.host.interfaces[0];
+    if (chosen === undefined) {
+      throw new ShellCommandError(
+        shellError(
+          "invalid_argument",
+          "dhclient",
+          "dhclient needs at least one interface",
+        ),
+      );
+    }
+    return chosen.name;
+  }
+
+  /** Deterministic source port for the shell's own UDP sockets. */
+  private nextUdpPort(): number {
+    this.udpPortSeed =
+      this.udpPortSeed >= 0xffff ? UDP_PORT_START : this.udpPortSeed + 1;
+    return this.udpPortSeed;
   }
 
   /**
