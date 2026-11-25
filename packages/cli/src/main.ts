@@ -2,14 +2,15 @@
 /**
  * `netlab` entrypoint: `run` executes a scenario (optionally saving it as a
  * recording), `replay` scrubs a recording back, `validate` judges a solution
- * against an exercise, `pcap` exports a scenario's wire traffic and
- * `pcap-import` reads a capture back.
+ * against an exercise, `pcap` exports a scenario's wire traffic,
+ * `pcap-import` reads a capture back and `serve` serves the bundled UI.
  *
  * Usage: netlab run <scenario.json> [--seed N] [--until 10s] [--format human|json] [--snapshot-out <recording.json>]
  *        netlab replay <recording.json> [--until 10s] [--format human|json] [--break-on-packet <filter>] [--break-on-tcp <STATE,...>]
  *        netlab validate <exercise.json> <solution.json> [--format human|json]
  *        netlab pcap <scenario.json> -o <out.pcap> [--until 10s] [--format human|json|pcap|pcapng] [--link <id>]...
  *        netlab pcap-import <capture.pcap|capture.pcapng> [--format human|json]
+ *        netlab serve [--port N] [--host H]
  * Exit codes: 0 ok · 1 scenario/runtime error or failed check · 2 usage or
  * parse error.
  */
@@ -25,6 +26,7 @@ import {
 } from "./replay";
 import { runScenario } from "./run";
 import { parseDurationToUs, parseScenarioText } from "./scenario";
+import { runServe, SERVE_USAGE } from "./serve";
 import { runValidate, VALIDATE_USAGE } from "./validate";
 
 const COMMANDS =
@@ -33,7 +35,8 @@ const COMMANDS =
   "  replay       scrub a saved run (recording) without simulating it\n" +
   "  validate     check a solution scenario against an exercise\n" +
   "  pcap         export a scenario's wire traffic as a pcap or pcapng file\n" +
-  "  pcap-import  parse a pcap or pcapng capture and describe its packets\n";
+  "  pcap-import  parse a pcap or pcapng capture and describe its packets\n" +
+  "  serve        serve the bundled UI on a local HTTP port\n";
 
 const USAGE =
   COMMANDS +
@@ -49,7 +52,9 @@ const USAGE =
   "\n" +
   PCAP_USAGE +
   "\n" +
-  PCAP_IMPORT_USAGE;
+  PCAP_IMPORT_USAGE +
+  "\n" +
+  SERVE_USAGE;
 
 interface CliArgs {
   file: string;
@@ -71,7 +76,7 @@ function parseArgs(argv: Array<string>): CliArgs {
   }
   if (argv[0] !== "run") {
     throw usageError(
-      `unknown command ${JSON.stringify(argv[0])} (expected "run", "replay", "validate", "pcap" or "pcap-import")`,
+      `unknown command ${JSON.stringify(argv[0])} (expected "run", "replay", "validate", "pcap", "pcap-import" or "serve")`,
     );
   }
   const rest = argv.slice(1);
@@ -137,6 +142,9 @@ async function main(argv: Array<string>): Promise<number> {
   if (argv[0] === "replay") {
     return runReplay(argv.slice(1));
   }
+  if (argv[0] === "serve") {
+    return runServe(argv.slice(1));
+  }
   let args: CliArgs;
   try {
     args = parseArgs(argv);
@@ -190,8 +198,10 @@ async function main(argv: Array<string>): Promise<number> {
   }
 }
 
-// When executed as the `netlab` bin (not when imported by tests).
-if (import.meta.path === Bun.main) {
+// When executed as the `netlab` bin, including a `bun build --compile` binary
+// (where `import.meta.path` and `Bun.main` disagree on separators), and not
+// when imported by tests.
+if (import.meta.main) {
   const code = await main(Bun.argv.slice(2));
   process.exit(code);
 }

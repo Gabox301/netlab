@@ -8,7 +8,9 @@
     "netlab": "./src/main.ts"
   },
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "gen-manifest": "bun scripts/gen-manifest.ts",
+    "compile": "bun scripts/gen-manifest.ts && mkdir -p ../../dist && bun build --compile src/main.ts --outfile ../../dist/netlab"
   },
   "dependencies": {
     "@netlab/bytes": "workspace:*",

@@ -23,6 +23,13 @@ coverage/
 *.pcapng
 snapshots/
 
+# UI embebida: manifest.gen.ts se genera desde packages/web/build
+packages/cli/src/manifest.gen.ts
+
+# Binario único de `bun build --compile`
+/netlab
+/netlab.exe
+
 # IDE
 .vscode/
 .idea/
