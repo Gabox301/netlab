@@ -11,7 +11,7 @@ Slice vertical ODD sobre netlab-roadmap.md § Fase 8 (líneas 789-800). Sin ataj
 
 - [x] T1 (S1) Benchmarks: `netlab bench` (eventos/s, memoria RSS, throughput TCP) + tabla publicada + job CI.
 - [x] T2 (S1) Accesibilidad: skip-link, `prefers-reduced-motion`, anuncios estado, contraste AA, tests a11y en web.
-- [ ] T3 (S1) Tutorial interactivo bienvenida (primera visita persistida, overlay/golden path replay/pcap).
+- [x] T3 (S1) Tutorial interactivo bienvenida (primera visita persistida, overlay/golden path replay/pcap).
 - [ ] T4 (S1) Sitio docs + README: teoría por protocolo enlazada a ejercicios + README actualizado a estado real.
 - [ ] T5 (S1) Demo pública: base path configurable + config deploy estático + worker verificado.
 - [ ] T6 (S1) Post técnico + guion video 60-90s (consolida odd/tasks/fase-5-tcp.md y fase-7).
@@ -19,3 +19,4 @@ Slice vertical ODD sobre netlab-roadmap.md § Fase 8 (líneas 789-800). Sin ataj
 ## Log
 
 - L1: "Si." (autorización Fase 8, sigue a checkpoint Fases 0-7 completas en 3a470ad)
+- L2: "Los commits deben ser de cada tarea, no todo junto." → T3–T6 se commitean por separado al verificarse cada uno.

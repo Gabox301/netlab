@@ -30,6 +30,21 @@ import type {
   WorkerRequest,
   WorkerResponse,
 } from "../lib/sim-protocol";
+import {
+  nextTutorialStep,
+  parseTutorialState,
+  previousTutorialStep,
+  readTutorialValue,
+  saveTutorialStatus,
+  shouldShowTutorial,
+  TUTORIAL_ANCHOR_ATTR,
+  TUTORIAL_MESSAGES,
+  TUTORIAL_STEPS,
+  type TutorialAnchor,
+  tutorialNextLabel,
+  tutorialProgressLabel,
+  tutorialStepAt,
+} from "../lib/tutorial";
 
 type TabId = "inspector" | "terminal" | "tablas";
 
@@ -84,6 +99,20 @@ let scrubUs = $state(0);
 let paused = $state(true);
 const SPEEDS: ReadonlyArray<number> = [0.5, 1, 2, 4];
 let speedIdx = $state(1);
+
+/* Fase 8 T3: overlay de bienvenida anclado al golden path del workbench. */
+let tutorialOpen = $state(false);
+let tutorialStep = $state(0);
+let tutorialCard = $state<HTMLDivElement | null>(null);
+let tutorialHelp = $state<HTMLButtonElement | null>(null);
+let tutorialReturnFocus: HTMLElement | null = null;
+let tutorialSpot = $state<{
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+} | null>(null);
+let tutorialCardPos = $state<{ top: number; left: number } | null>(null);
 
 function clockRate(): number {
   return (horizonUs / PLAY_HORIZON_MS) * (SPEEDS[speedIdx] ?? 1);
@@ -314,6 +343,12 @@ const horizon = $derived(horizonUs);
 
 onMount(() => {
   startWorker();
+  // Primera visita: el overlay se abre solo y deja "visto" guardado para
+  // que un refresh no lo repita. Ayuda siempre puede reabrirlo.
+  if (shouldShowTutorial(readTutorialValue())) {
+    tutorialOpen = true;
+    saveTutorialStatus("seen");
+  }
   return () => {
     stopTimer();
     worker?.terminate();
@@ -633,6 +668,9 @@ function onSpeedChange(event: Event): void {
 }
 
 function onReplayKey(event: KeyboardEvent): void {
+  if (tutorialOpen) {
+    return;
+  }
   if (event.ctrlKey || event.metaKey || event.altKey) {
     return;
   }
@@ -656,6 +694,145 @@ function onReplayKey(event: KeyboardEvent): void {
     step(-1);
   }
 }
+
+/* Tutorial de bienvenida (Fase 8 T3) -------------------------------------- */
+
+function openTutorial(trigger: HTMLElement | null = null): void {
+  tutorialReturnFocus = trigger ?? tutorialHelp;
+  tutorialStep = 0;
+  tutorialOpen = true;
+}
+
+function closeTutorial(completed: boolean): void {
+  // Completar es terminal: reabrir y omitir no degrada el estado guardado.
+  const previous = parseTutorialState(readTutorialValue())?.status;
+  saveTutorialStatus(
+    completed || previous === "completed" ? "completed" : "seen",
+  );
+  tutorialOpen = false;
+  tutorialSpot = null;
+  tutorialCardPos = null;
+  const back = tutorialReturnFocus ?? tutorialHelp;
+  tutorialReturnFocus = null;
+  back?.focus();
+}
+
+function advanceTutorial(): void {
+  if (tutorialStep >= TUTORIAL_STEPS.length - 1) {
+    closeTutorial(true);
+    return;
+  }
+  tutorialStep = nextTutorialStep(tutorialStep);
+}
+
+/** Vuelve un paso; en el primero, el foco no queda en un botón deshabilitado. */
+function retreatTutorial(): void {
+  tutorialStep = previousTutorialStep(tutorialStep);
+  if (tutorialStep === 0) {
+    tutorialCard?.focus();
+  }
+}
+
+/** Tab queda atrapado en el diálogo y Escape lo cierra como Omitir. */
+function onTutorialKey(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeTutorial(false);
+    return;
+  }
+  if (event.key !== "Tab" || tutorialCard === null) {
+    return;
+  }
+  const focusable = [
+    ...tutorialCard.querySelectorAll<HTMLElement>("button:not(:disabled)"),
+  ];
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (first === undefined || last === undefined) {
+    return;
+  }
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || active === tutorialCard)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+/**
+ * Posiciona el spotlight y la tarjeta sobre el anclaje del paso. La tarjeta
+ * va debajo del objetivo si entra y arriba si no; el viewport siempre manda.
+ */
+function placeTutorial(anchor: TutorialAnchor): void {
+  const card = tutorialCard;
+  if (card === null) {
+    return;
+  }
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const margin = 12;
+  const width = card.offsetWidth || 340;
+  const height = card.offsetHeight || 220;
+  const target = document.querySelector<HTMLElement>(
+    `[${TUTORIAL_ANCHOR_ATTR}="${anchor}"]`,
+  );
+  if (target === null) {
+    tutorialSpot = null;
+    tutorialCardPos = {
+      top: Math.max(margin, (vh - height) / 2),
+      left: Math.max(margin, (vw - width) / 2),
+    };
+    return;
+  }
+  const rect = target.getBoundingClientRect();
+  const spotTop = Math.max(0, rect.top - 6);
+  const spotLeft = Math.max(0, rect.left - 6);
+  tutorialSpot = {
+    top: spotTop,
+    left: spotLeft,
+    width: Math.max(0, Math.min(vw - spotLeft, rect.width + 12)),
+    height: Math.max(0, Math.min(vh - spotTop, rect.height + 12)),
+  };
+  const left = Math.min(
+    Math.max(rect.left + rect.width / 2 - width / 2, margin),
+    Math.max(margin, vw - width - margin),
+  );
+  const below = rect.bottom + margin;
+  const top =
+    below + height <= vh - margin
+      ? below
+      : Math.max(
+          margin,
+          Math.min(rect.top - height - margin, vh - height - margin),
+        );
+  tutorialCardPos = { top, left };
+}
+
+/** Al abrir, el foco entra al diálogo (role="dialog" aria-modal). */
+$effect(() => {
+  if (tutorialOpen && tutorialCard !== null) {
+    tutorialCard.focus();
+  }
+});
+
+/** Reposiciona al cambiar de paso y cuando la página scrollea o cambia. */
+$effect(() => {
+  if (!tutorialOpen || tutorialCard === null) {
+    return;
+  }
+  const anchor = tutorialStepAt(tutorialStep).anchor;
+  const place = () => placeTutorial(anchor);
+  place();
+  window.addEventListener("resize", place);
+  document.addEventListener("scroll", place, true);
+  return () => {
+    window.removeEventListener("resize", place);
+    document.removeEventListener("scroll", place, true);
+  };
+});
 
 function scrubTo(value: number): void {
   stopTimer();
@@ -861,6 +1038,15 @@ function isNodeActive(id: string): boolean {
     </div>
     <a class="navlink" href="/editor">Editor →</a>
     <a class="navlink" href="/practica">Práctica →</a>
+    <button
+      class="navlink"
+      type="button"
+      bind:this={tutorialHelp}
+      onclick={(event) => openTutorial(event.currentTarget)}
+      title={TUTORIAL_MESSAGES.helpTitle}
+    >
+      <span aria-hidden="true">?</span> {TUTORIAL_MESSAGES.help}
+    </button>
     <div class="sp"></div>
     <div class="simtime mono" role="timer" aria-label="Tiempo virtual">
       t = {scrubUs} µs
@@ -870,6 +1056,7 @@ function isNodeActive(id: string): boolean {
       type="button"
       onclick={() => requestRun(true)}
       disabled={loading}
+      data-tutorial="run"
     >
       ▶ Run
     </button>
@@ -1044,7 +1231,7 @@ function isNodeActive(id: string): boolean {
       </div>
     </section>
 
-    <section class="col packets-col" aria-label="Paquetes">
+    <section class="col packets-col" aria-label="Paquetes" data-tutorial="packets">
       <h2>
         <span>Paquetes{result ? ` · ${packets.length}` : ""}</span>
         <span class="chips" role="group" aria-label="Filtrar protocolo">
@@ -1178,7 +1365,7 @@ function isNodeActive(id: string): boolean {
         </table>
       </div>
 
-      <div class="timeline">
+      <div class="timeline" data-tutorial="timeline">
         <label for="scrub">
           <span>Línea de tiempo · replay determinista, seed {result?.seed ?? 11}</span>
           <span class="mono">{scrubUs} µs</span>
@@ -1407,6 +1594,58 @@ function isNodeActive(id: string): boolean {
       </div>
     </section>
   </main>
+
+  {#if tutorialOpen}
+    {@const step = tutorialStepAt(tutorialStep)}
+    <div class="tut-layer">
+      {#if tutorialSpot}
+        <div
+          class="tut-spot"
+          style={`top:${tutorialSpot.top}px;left:${tutorialSpot.left}px;width:${tutorialSpot.width}px;height:${tutorialSpot.height}px`}
+          aria-hidden="true"
+        ></div>
+      {/if}
+      <div
+        class="tut-card"
+        style={tutorialCardPos === null
+          ? undefined
+          : `top:${tutorialCardPos.top}px;left:${tutorialCardPos.left}px`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={TUTORIAL_MESSAGES.dialogLabel}
+        tabindex="-1"
+        bind:this={tutorialCard}
+        onkeydown={onTutorialKey}
+      >
+        <p class="tut-progress mono">{tutorialProgressLabel(tutorialStep)}</p>
+        <h2 class="tut-title">{step.title}</h2>
+        <p class="tut-line">{step.line}</p>
+        <p class="tut-action">
+          <span class="tut-dot" aria-hidden="true"></span>
+          {step.action}
+        </p>
+        <div class="tut-actions">
+          <button
+            type="button"
+            disabled={tutorialStep === 0}
+            onclick={retreatTutorial}
+          >
+            {TUTORIAL_MESSAGES.back}
+          </button>
+          <button class="tut-next" type="button" onclick={advanceTutorial}>
+            {tutorialNextLabel(tutorialStep)}
+          </button>
+          <button
+            class="tut-skip"
+            type="button"
+            onclick={() => closeTutorial(false)}
+          >
+            {TUTORIAL_MESSAGES.skip}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <footer class="status">
     <span>
@@ -2309,6 +2548,91 @@ function isNodeActive(id: string): boolean {
     clip: rect(0 0 0 0);
     white-space: nowrap;
     border: 0;
+  }
+  /* Fase 8 T3: overlay del tutorial de bienvenida. */
+  .tut-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+  }
+  .tut-spot {
+    position: fixed;
+    border: 2px solid var(--acc);
+    box-shadow: 0 0 0 9999px rgba(5, 5, 6, 0.78);
+    pointer-events: none;
+  }
+  .tut-card {
+    position: fixed;
+    top: 0.75rem;
+    left: 0.75rem;
+    width: min(22rem, calc(100vw - 1.5rem));
+    padding: 1rem 1.1rem;
+    background: var(--panel);
+    border: 1px solid var(--acc);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  }
+  .tut-card:focus-visible {
+    outline: 2px solid var(--acc);
+    outline-offset: 2px;
+  }
+  .tut-progress {
+    margin: 0 0 0.35rem;
+    color: var(--ok);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .tut-title {
+    margin: 0 0 0.35rem;
+    font: 700 1.1rem var(--disp);
+    letter-spacing: 0.3px;
+  }
+  .tut-line {
+    margin: 0 0 0.55rem;
+    color: var(--mut);
+  }
+  .tut-action {
+    display: flex;
+    gap: 0.5rem;
+    margin: 0 0 0.9rem;
+    color: var(--ink);
+  }
+  .tut-dot {
+    flex: none;
+    width: 0.45rem;
+    height: 0.45rem;
+    margin-top: 0.4rem;
+    border-radius: 50%;
+    background: var(--acc);
+  }
+  .tut-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .tut-next {
+    background: var(--ok);
+    border-color: var(--ok);
+    color: #050506;
+    font-weight: 600;
+  }
+  .tut-skip {
+    margin-left: auto;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .tut-card {
+      animation: tut-in 0.14s ease-out;
+    }
+    @keyframes tut-in {
+      from {
+        opacity: 0;
+        transform: translateY(4px);
+      }
+      to {
+        opacity: 1;
+        transform: none;
+      }
+    }
   }
   @media (prefers-reduced-motion: reduce) {
     *,
