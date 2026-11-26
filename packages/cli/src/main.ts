@@ -4,6 +4,7 @@
  * recording), `replay` scrubs a recording back, `validate` judges a solution
  * against an exercise, `pcap` exports a scenario's wire traffic,
  * `pcap-import` reads a capture back and `serve` serves the bundled UI.
+ * `bench` runs synthetic engine benchmarks.
  *
  * Usage: netlab run <scenario.json> [--seed N] [--until 10s] [--format human|json] [--snapshot-out <recording.json>]
  *        netlab replay <recording.json> [--until 10s] [--format human|json] [--break-on-packet <filter>] [--break-on-tcp <STATE,...>]
@@ -16,6 +17,7 @@
  */
 
 import { readFile, writeFile } from "node:fs/promises";
+import { BENCH_USAGE, runBench } from "./bench";
 import { PCAP_IMPORT_USAGE, PCAP_USAGE, runPcap, runPcapImport } from "./pcap";
 import {
   formatRecording,
@@ -36,7 +38,8 @@ const COMMANDS =
   "  validate     check a solution scenario against an exercise\n" +
   "  pcap         export a scenario's wire traffic as a pcap or pcapng file\n" +
   "  pcap-import  parse a pcap or pcapng capture and describe its packets\n" +
-  "  serve        serve the bundled UI on a local HTTP port\n";
+  "  serve        serve the bundled UI on a local HTTP port\n" +
+  "  bench        run synthetic engine benchmarks\n";
 
 const USAGE =
   COMMANDS +
@@ -54,7 +57,9 @@ const USAGE =
   "\n" +
   PCAP_IMPORT_USAGE +
   "\n" +
-  SERVE_USAGE;
+  SERVE_USAGE +
+  "\n" +
+  BENCH_USAGE;
 
 interface CliArgs {
   file: string;
@@ -76,7 +81,7 @@ function parseArgs(argv: Array<string>): CliArgs {
   }
   if (argv[0] !== "run") {
     throw usageError(
-      `unknown command ${JSON.stringify(argv[0])} (expected "run", "replay", "validate", "pcap", "pcap-import" or "serve")`,
+      `unknown command ${JSON.stringify(argv[0])} (expected "run", "replay", "validate", "pcap", "pcap-import", "serve" or "bench")`,
     );
   }
   const rest = argv.slice(1);
@@ -144,6 +149,9 @@ async function main(argv: Array<string>): Promise<number> {
   }
   if (argv[0] === "serve") {
     return runServe(argv.slice(1));
+  }
+  if (argv[0] === "bench") {
+    return runBench(argv.slice(1));
   }
   let args: CliArgs;
   try {
