@@ -96,13 +96,20 @@ jobs:
             # TCP "retransmission" warning is expected and allowed: a capture
             # of the whole network records each transmission once per link,
             # and that is what the simulation sees (pcapng labels each link as
-            # its own interface; F-122).
+            # its own interface; F-122). Likewise, ICMP *error messages*
+            # ("Type indicates an error", Time Exceeded from traceroute,
+            # Destination Unreachable, ...) are legitimate simulated traffic:
+            # the exercises exercise them on purpose. Only real expert
+            # errors (malformed frames, bad checksums, other "error" text)
+            # fail the gate.
             expert=$(tshark -r "$f" \
               -o ip.check_checksum:true \
               -o tcp.check_checksum:true \
               -o udp.check_checksum:true \
               -T fields -e frame.number -e _ws.expert.message)
-            if printf '%s\n' "$expert" | grep -qiE 'malformed|checksum|error'; then
+            bad=$(printf '%s\n' "$expert" | grep -iE 'malformed|checksum' || true)
+            errs=$(printf '%s\n' "$expert" | grep -i 'error' | grep -vi 'indicates an error' || true)
+            if [ -n "$bad$errs" ]; then
               echo "::error::$f has expert errors or checksum warnings"
               printf '%s\n' "$expert" | grep -iE 'malformed|checksum|error'
               status=1
