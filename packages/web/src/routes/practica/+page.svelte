@@ -433,7 +433,7 @@ function submitSubnet(event: SubmitEvent): void {
       modo práctica · {PRACTICE_ROUTES.length} rutas · {PRACTICE_EXERCISES.length}
       ejercicios
     </div>
-    <a class="navlink" href={resolve("/")}>← Workbench</a>
+    <a class="navlink" href={resolve("/workbench")}>← Workbench</a>
     <a class="navlink" href={resolve("/editor")}>Editor →</a>
     <div class="sp"></div>
     <span class="counter mono">{solved}/{PRACTICE_EXERCISES.length} resueltos</span>

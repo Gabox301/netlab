@@ -1034,7 +1034,7 @@ $effect(() => {
 });
 
 /* Ayuda contextual (A1) ----------------------------------------------------
- * El patrón es el mismo del tutorial del workbench (`routes/+page.svelte`):
+ * El patrón es el mismo del tutorial del workbench (`routes/workbench/+page.svelte`):
  * overlay fijo, foco al diálogo, Tab atrapado adentro, Esc cierra y el foco
  * vuelve al botón que lo abrió. Los pasos y los atajos son datos puros de
  * `lib/help.ts`, así que acá solo queda el cableado de la vista.
@@ -1990,7 +1990,7 @@ function exportJson(): void {
     >
       <span aria-hidden="true">?</span> {HELP_MESSAGES.open}
     </button>
-    <a class="linkbtn" href={resolve("/")}>Workbench</a>
+    <a class="linkbtn" href={resolve("/workbench")}>Workbench</a>
     <button type="button" onclick={loadExample}>Ejemplo</button>
     <button type="button" onclick={openImport}>Importar JSON</button>
     <input

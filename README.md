@@ -82,7 +82,8 @@ bun run --cwd packages/web build   # genera packages/web/build
 bun run netlab -- serve            # http://127.0.0.1:8080
 ```
 
-Rutas: `/` workbench (topología, inspector de paquetes, consola por host),
+Rutas: `/` landing (qué es NetLab, los tres modos y cómo empezar),
+`/workbench` workbench (topología, inspector de paquetes, consola por host),
 `/editor` editor de topología y `/practica` rutas de aprendizaje, ejercicios y
 trainer de subnetting. `serve` escucha en loopback por defecto.
 
@@ -101,7 +102,7 @@ TTFB de ese binario.
 | `packages/exercises` | Catálogo de ejercicios y rutas, validadores, trainer de subnetting.                         |
 | `packages/pcap`      | Lectura y escritura de PCAP y PCAPNG.                                                       |
 | `packages/cli`       | `netlab` (`run`, `replay`, `validate`, `pcap`, `pcap-import`, `bench`, `serve`).            |
-| `packages/web`       | UI SvelteKit con adaptador estático: workbench, inspector, editor y práctica.               |
+| `packages/web`       | UI SvelteKit con adaptador estático: landing, workbench, inspector, editor y práctica.      |
 | `packages/server`    | Reservado para el backend; hoy solo el marcador del paquete.                                |
 
 Fuera de `packages/`: `docs/` (documentación), `odd/tasks/` (tareas por fase),

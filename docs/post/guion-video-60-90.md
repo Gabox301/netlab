@@ -166,22 +166,22 @@ estable. El resto va con línea exacta.
 
 - Encabezado del workbench (`NetLab`, `dos-subredes.json · seed 11`,
   `t = … µs`, `▶ Run`, `⏸ Pause`, `⏮ Prev`, `⏭ Next`, `⟲ Start`): bloque
-  `<header class="top">` de `packages/web/src/routes/+page.svelte`.
+  `<header class="top">` de `packages/web/src/routes/workbench/+page.svelte`.
 - Escenario fijo del workbench: `h1 10.0.0.2 — r1 — h2 10.0.1.2`, semilla 11,
   horizonte 10 000 µs, 4 pings de 32 B cada 2 500 µs —
   `packages/web/src/lib/scenario.ts:25-32`.
 - Pestañas `Inspector / Terminal h1 / Tablas`: constantes `TAB_ORDER` y
-  `TAB_LABEL` de `packages/web/src/routes/+page.svelte`.
+  `TAB_LABEL` de `packages/web/src/routes/workbench/+page.svelte`.
 - Volcado hexadecimal, resaltado bidireccional y su hint: bloque
   `<pre class="hex" aria-label="Volcado hexadecimal del frame">` de
-  `packages/web/src/routes/+page.svelte`.
+  `packages/web/src/routes/workbench/+page.svelte`.
 - Slider con `aria-label="Retroceder al instante"` y lectura en µs:
-  `packages/web/src/routes/+page.svelte` (elemento `id="scrub"`).
+  `packages/web/src/routes/workbench/+page.svelte` (elemento `id="scrub"`).
 - Teclas globales (espacio pausa, ← y → paso a paso): `onReplayKey` de
-  `packages/web/src/routes/+page.svelte`; las filas aceptan ↑/↓, Enter y espacio:
+  `packages/web/src/routes/workbench/+page.svelte`; las filas aceptan ↑/↓, Enter y espacio:
   `onRowKey` del mismo archivo.
 - Preselección del primer ICMP y del primer instante al terminar un run:
-  `handleMessage` de `packages/web/src/routes/+page.svelte`.
+  `handleMessage` de `packages/web/src/routes/workbench/+page.svelte`.
 - `serve` imprime `netlab listo en <url>` y escucha en loopback por defecto:
   `packages/cli/src/serve.ts:32-36`.
 - `run --snapshot-out` y `replay --break-on-tcp`: `packages/cli/src/replay.ts:20-28`;

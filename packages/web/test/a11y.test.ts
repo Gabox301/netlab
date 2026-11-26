@@ -69,9 +69,9 @@ describe("mensaje de estado del workbench (región aria-live)", () => {
   });
 });
 
-describe("DOM a11y del workbench (pins de presencia)", () => {
+describe("DOM a11y del workbench en /workbench (pins de presencia)", () => {
   const source = Bun.file(
-    new URL("../src/routes/+page.svelte", import.meta.url),
+    new URL("../src/routes/workbench/+page.svelte", import.meta.url),
   );
 
   test("skip-link a la lista de paquetes", async () => {

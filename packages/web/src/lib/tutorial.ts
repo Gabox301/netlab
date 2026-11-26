@@ -1,7 +1,7 @@
 /**
  * Tutorial interactivo de bienvenida (Fase 8 T3).
  *
- * El overlay de tres pasos vive en `routes/+page.svelte`; acá queda la parte
+ * El overlay de tres pasos vive en `routes/workbench/+page.svelte`; acá queda la parte
  * pura que se puede pinnear con tests: los pasos anclados al golden path del
  * workbench (Run → frame → scrub), la copia en español, la clave de
  * localStorage y la decisión de primera visita.

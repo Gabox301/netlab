@@ -2,7 +2,7 @@
  * Helpers de accesibilidad del workbench: puros y testeables.
  *
  * El DOM (skip-link, región aria-live, `prefers-reduced-motion`) vive en
- * `routes/+page.svelte`; acá queda la lógica que sí se puede pinnear con
+ * `routes/workbench/+page.svelte`; acá queda la lógica que sí se puede pinnear con
  * tests: contraste WCAG de la paleta y el mensaje de estado en español.
  */
 
