@@ -23,6 +23,13 @@ import {
   flowLanes,
 } from "../lib/filter";
 import { buildFlights, type Flight } from "../lib/flights";
+import {
+  HELP_MESSAGES,
+  hasInlineGuide,
+  VALIDATION_FLOW,
+  WORKBENCH_HELP_SHORTCUTS,
+  WORKBENCH_LEGEND,
+} from "../lib/help";
 import type {
   ExecResponse,
   InterfaceSnapshot,
@@ -1092,6 +1099,50 @@ function isNodeActive(id: string): boolean {
     </label>
   </header>
 
+  {#if hasInlineGuide("workbench")}
+    <details class="guide">
+      <summary>
+        <span>{HELP_MESSAGES.guideTitle}</span>
+        <span class="guide-note">{HELP_MESSAGES.guideSummary}</span>
+      </summary>
+      <div class="guide-grid">
+        <div class="guide-block">
+          <h2>{HELP_MESSAGES.flowTitle}</h2>
+          <ol class="guide-flow">
+            {#each VALIDATION_FLOW as item (item.id)}
+              <li>
+                <b>{item.title}</b>
+                <span>{item.line}</span>
+              </li>
+            {/each}
+          </ol>
+        </div>
+        <div class="guide-block">
+          <h2>{HELP_MESSAGES.keysTitle}</h2>
+          {#each WORKBENCH_HELP_SHORTCUTS as group (group.title)}
+            <ul class="guide-keys">
+              {#each group.shortcuts as shortcut (shortcut.keys)}
+                <li><kbd>{shortcut.keys}</kbd><span>{shortcut.what}</span></li>
+              {/each}
+            </ul>
+          {/each}
+        </div>
+        <div class="guide-block">
+          <h2>{HELP_MESSAGES.legendTitle}</h2>
+          <ul class="guide-legend">
+            {#each WORKBENCH_LEGEND as item (item.id)}
+              <li>
+                <span class="swatch {item.id}" aria-hidden="true"></span>
+                <b class="mono">{item.label}</b>
+                <span>{item.what}</span>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      </div>
+    </details>
+  {/if}
+
   <main class="workbench">
     <section class="col topo-col" aria-label="Topología">
       <h2>Topología</h2>
@@ -1313,6 +1364,11 @@ function isNodeActive(id: string): boolean {
         <p class="error" role="alert">{error}</p>
       {:else if loading && result === null}
         <p class="empty">Ejecutando dos-subredes en el worker…</p>
+      {:else if result !== null && visiblePackets.length === 0}
+        <p class="empty">
+          Ningún frame coincide con la expresión y los chips activos. Limpiá el
+          filtro o quitá chips de protocolo para volver a la lista completa.
+        </p>
       {/if}
 
       <div class="table-wrap">
@@ -1786,6 +1842,121 @@ function isNodeActive(id: string): boolean {
 
   .navlink:hover {
     border-color: var(--acc);
+  }
+
+  /* A2: guía inline del workbench (flujo, atajos de replay y leyenda). */
+  .guide {
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    padding: 0 16px 6px;
+  }
+
+  .guide summary {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    flex-wrap: wrap;
+    padding: 6px 0;
+    cursor: pointer;
+    color: var(--ink);
+    font-size: 12.5px;
+  }
+
+  .guide summary:hover {
+    color: var(--acc);
+  }
+
+  .guide-note {
+    color: var(--mut);
+    font-size: 11.5px;
+  }
+
+  .guide-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 10px 24px;
+    padding: 2px 0 8px;
+  }
+
+  .guide-block h2 {
+    margin: 0 0 4px;
+    color: var(--dim);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .guide-flow,
+  .guide-keys,
+  .guide-legend {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 3px;
+    font-size: 12px;
+  }
+
+  .guide-flow li,
+  .guide-keys li,
+  .guide-legend li {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+  }
+
+  .guide-flow b {
+    color: var(--ok);
+    font-weight: 600;
+  }
+
+  .guide-flow span,
+  .guide-keys span,
+  .guide-legend span:last-child {
+    color: var(--mut);
+  }
+
+  .guide-keys li {
+    display: grid;
+    grid-template-columns: 5rem minmax(0, 1fr);
+    gap: 6px;
+    align-items: baseline;
+  }
+
+  .guide-keys kbd {
+    color: var(--ok);
+    font: 600 11px var(--mono);
+  }
+
+  .guide-legend b {
+    flex: none;
+    min-width: 6.5rem;
+    font-weight: 600;
+  }
+
+  .swatch {
+    flex: none;
+    width: 18px;
+    height: 3px;
+    margin-top: 5px;
+    background: var(--mut);
+  }
+
+  .swatch.rx {
+    background: var(--ok);
+  }
+
+  .swatch.drop,
+  .swatch.dropped {
+    background: var(--bad);
+  }
+
+  .swatch.dropped {
+    background: repeating-linear-gradient(
+      to right,
+      var(--bad) 0 3px,
+      transparent 3px 5px
+    );
   }
 
   .simtime {

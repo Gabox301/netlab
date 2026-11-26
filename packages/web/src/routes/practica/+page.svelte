@@ -10,6 +10,7 @@ import {
 } from "@netlab/exercises";
 import { onMount } from "svelte";
 import { base } from "$app/paths";
+import { HELP_MESSAGES, hasInlineGuide, VALIDATION_FLOW } from "../../lib/help";
 import {
   emptyPracticeStore,
   emptyProgress,
@@ -459,6 +460,24 @@ function submitSubnet(event: SubmitEvent): void {
           Armá la solución en el editor, exportá el JSON v1 y subilo en el
           detalle del ejercicio.
         </p>
+        {#if hasInlineGuide("practica")}
+          <div class="how">
+            <h2>{HELP_MESSAGES.howTitle}</h2>
+            <ol class="how-flow">
+              {#each VALIDATION_FLOW as item (item.id)}
+                <li>
+                  <b>{item.title}</b>
+                  <span>{item.line}</span>
+                </li>
+              {/each}
+            </ol>
+            <p class="how-note">
+              Validar corre la simulación y devuelve PASS/FAIL con el detalle de
+              lo que falló, sin comparar texto contra un modelo guardado. Podés
+              revalidar las veces que quieras: queda el mejor puntaje.
+            </p>
+          </div>
+        {/if}
         {#if workerError !== null}
           <p class="banner err">Worker: {workerError}</p>
         {/if}
@@ -748,6 +767,10 @@ function submitSubnet(event: SubmitEvent): void {
               {validating ? "Validando…" : "Validar"}
             </button>
           </div>
+          <p class="upload-hint">
+            Necesitás el JSON v1 exportado desde el editor y el worker listo;
+            Validar se habilita cuando elegís el archivo.
+          </p>
           {#if solutionError !== null}
             <p class="banner err">{solutionError}</p>
           {/if}
@@ -973,6 +996,49 @@ function submitSubnet(event: SubmitEvent): void {
     color: var(--mut);
     max-width: 72ch;
     line-height: 1.5;
+  }
+
+  /* A2: guía inline de Práctica (flujo de validación, sin respuestas). */
+  .how {
+    margin: 14px 0 0;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    background: var(--panel2);
+    max-width: 72ch;
+  }
+
+  .how h2 {
+    margin: 0 0 6px;
+    color: var(--dim);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .how-flow {
+    margin: 0;
+    padding: 0 0 0 1.1rem;
+    display: grid;
+    gap: 4px;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .how-flow b {
+    color: var(--ok);
+    font-weight: 600;
+    margin-right: 4px;
+  }
+
+  .how-flow span {
+    color: var(--mut);
+  }
+
+  .how-note {
+    margin: 8px 0 0;
+    color: var(--dim);
+    font-size: 12px;
+    line-height: 1.45;
   }
 
   .dim {
@@ -1404,6 +1470,13 @@ function submitSubnet(event: SubmitEvent): void {
   .file-name {
     color: var(--mut);
     font-size: 12px;
+  }
+
+  .upload-hint {
+    margin: 8px 0 0;
+    color: var(--dim);
+    font-size: 12px;
+    line-height: 1.45;
   }
 
   .run-meta {

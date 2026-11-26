@@ -10,7 +10,7 @@ Ayuda contextual en cada pantalla, sin spoilear ejercicios.
 ## Tasks
 
 - [x] A1 (S1) Editor: botón de ayuda + overlay/panel con tour (paleta, canvas, propiedades, validar/exportar JSON) y atajos. Reutilizar el patrón de `lib/tutorial.ts` si encaja.
-- [ ] A2 (S1+S2) Guías sin respuestas: repasar textos de ayuda existentes (workbench, práctica) y agregar donde falte qué-hacer-acá general (atajos, leyenda, flujo validar) sin mencionar soluciones.
+- [x] A2 (S1+S2) Guías sin respuestas: repasar textos de ayuda existentes (workbench, práctica) y agregar donde falte qué-hacer-acá general (atajos, leyenda, flujo validar) sin mencionar soluciones.
 
 ## Log
 
