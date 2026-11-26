@@ -69,35 +69,26 @@ jobs:
         run: |
           set -euo pipefail
           echo "tshark is the S2 oracle here; without it locally, run bun test for the structural checks"
-          id -u; umask
-          mkdir -p pcaps
-          bun packages/cli/src/main.ts pcap packages/cli/fixtures/dos-subredes.json -o pcaps/icmp.pcap --until 100ms
-          bun packages/cli/src/main.ts pcap packages/exercises/solutions/svc-dns-broken.json -o pcaps/dns.pcap --until 100ms
-          bun packages/cli/src/main.ts pcap packages/exercises/solutions/tcp-zero-window.json -o pcaps/tcp.pcap --until 100ms
+          # tshark en este runner devuelve EACCES con archivos 644 bajo
+          # $GITHUB_WORKSPACE pero los abre bien en /tmp (probado en CI):
+          # generar fuera del workspace.
+          PCAP_DIR="$(mktemp -d)"
+          echo "PCAP_DIR=$PCAP_DIR" >> "$GITHUB_ENV"
+          bun packages/cli/src/main.ts pcap packages/cli/fixtures/dos-subredes.json -o "$PCAP_DIR/icmp.pcap" --until 100ms
+          bun packages/cli/src/main.ts pcap packages/exercises/solutions/svc-dns-broken.json -o "$PCAP_DIR/dns.pcap" --until 100ms
+          bun packages/cli/src/main.ts pcap packages/exercises/solutions/tcp-zero-window.json -o "$PCAP_DIR/tcp.pcap" --until 100ms
           # pcapng: one interface per link, and per-link selection (F-121, F-122).
-          bun packages/cli/src/main.ts pcap packages/cli/fixtures/dos-subredes.json -o pcaps/icmp.pcapng --until 100ms --format pcapng
-          bun packages/cli/src/main.ts pcap packages/cli/fixtures/dos-subredes.json -o pcaps/icmp-l1.pcapng --until 100ms --format pcapng --link l1
-          ls -la pcaps/
-          chmod a+r pcaps/*
-          for f in pcaps/icmp.pcap pcaps/dns.pcap pcaps/tcp.pcap pcaps/icmp.pcapng pcaps/icmp-l1.pcapng; do
+          bun packages/cli/src/main.ts pcap packages/cli/fixtures/dos-subredes.json -o "$PCAP_DIR/icmp.pcapng" --until 100ms --format pcapng
+          bun packages/cli/src/main.ts pcap packages/cli/fixtures/dos-subredes.json -o "$PCAP_DIR/icmp-l1.pcapng" --until 100ms --format pcapng --link l1
+          ls -la "$PCAP_DIR/"
+          for f in "$PCAP_DIR"/icmp.pcap "$PCAP_DIR"/dns.pcap "$PCAP_DIR"/tcp.pcap "$PCAP_DIR"/icmp.pcapng "$PCAP_DIR"/icmp-l1.pcapng; do
             test -s "$f" || { echo "::error::missing or empty $f"; exit 1; }
             test -r "$f" || { echo "::error::unreadable $f"; exit 1; }
           done
       - name: tshark opens every capture without errors or checksum warnings
         run: |
           status=0
-          echo "--- diagnostico de entorno ---"
-          id; umask; which -a tshark || true
-          dpkg -S /usr/bin/tshark 2>/dev/null || true
-          ls -la pcaps/
-          for f in pcaps/*.pcap pcaps/*.pcapng; do namei -l "$f" || true; done
-          echo "--- experimento EACCES (una sola corrida) ---"
-          cat pcaps/dns.pcap > /dev/null && echo "runner lee el archivo OK"
-          cp pcaps/dns.pcap /tmp/dns-probe.pcap && echo "copia a /tmp OK"
-          tshark -r /tmp/dns-probe.pcap -q -c 1 > /dev/null && echo "tshark abre /tmp OK" || echo "tshark TAMBIEN falla en /tmp"
-          tshark -r "$PWD/pcaps/dns.pcap" -q -c 1 > /dev/null && echo "ruta absoluta OK" || echo "ruta absoluta falla"
-          rm -f /tmp/dns-probe.pcap
-          for f in pcaps/*.pcap pcaps/*.pcapng; do
+          for f in "$PCAP_DIR"/*.pcap "$PCAP_DIR"/*.pcapng; do
             echo "::group::tshark -r $f -q -z expert"
             tshark -r "$f" -q -z expert || status=1
             echo "::endgroup::"
@@ -121,27 +112,27 @@ jobs:
       - name: tshark decodes the DNS, TCP and ICMP traffic
         run: |
           set -euo pipefail
-          dns=$(tshark -r pcaps/dns.pcap -Y dns -T fields -e dns.qry.name)
+          dns=$(tshark -r "$PCAP_DIR"/dns.pcap -Y dns -T fields -e dns.qry.name)
           echo "DNS query names:"
           echo "$dns"
           echo "$dns" | grep -qx "web.lab"
-          syn=$(tshark -r pcaps/tcp.pcap \
+          syn=$(tshark -r "$PCAP_DIR"/tcp.pcap \
             -Y 'tcp.flags.syn == 1 && tcp.flags.ack == 0' \
             -T fields -e tcp.dstport | sort -u)
           echo "TCP SYN destination ports:"
           echo "$syn"
           echo "$syn" | grep -qx "80"
-          icmp=$(tshark -r pcaps/icmp.pcap -Y icmp -T fields -e frame.number | wc -l)
+          icmp=$(tshark -r "$PCAP_DIR"/icmp.pcap -Y icmp -T fields -e frame.number | wc -l)
           echo "ICMP packets: $icmp"
           test "$icmp" -gt 0
           # pcapng keeps the same traffic and labels the links as interfaces.
-          ng=$(tshark -r pcaps/icmp.pcapng -Y icmp -T fields -e frame.number | wc -l)
+          ng=$(tshark -r "$PCAP_DIR"/icmp.pcapng -Y icmp -T fields -e frame.number | wc -l)
           echo "ICMP packets (pcapng): $ng"
           test "$ng" -ge "$icmp"
-          ifaces=$(tshark -r pcaps/icmp.pcapng -T fields -e frame.interface_id | sort -u | wc -l)
+          ifaces=$(tshark -r "$PCAP_DIR"/icmp.pcapng -T fields -e frame.interface_id | sort -u | wc -l)
           echo "pcapng interfaces: $ifaces"
           test "$ifaces" -ge 2
           # --link captured one interface only, and only its frames.
-          one=$(tshark -r pcaps/icmp-l1.pcapng -T fields -e frame.interface_id | sort -u | wc -l)
+          one=$(tshark -r "$PCAP_DIR"/icmp-l1.pcapng -T fields -e frame.interface_id | sort -u | wc -l)
           echo "selected interfaces: $one"
           test "$one" -eq 1
