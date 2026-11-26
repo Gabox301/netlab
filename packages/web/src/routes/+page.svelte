@@ -6,7 +6,6 @@ import {
   LANDING_STEPS,
   LANDING_THEORY,
   LANDING_THEORY_NOTE,
-  LANDING_THEORY_ROOT,
 } from "../lib/landing";
 </script>
 
@@ -23,6 +22,7 @@ import {
     <div class="sp"></div>
     <a class="navlink" href={resolve("/workbench")}>Workbench →</a>
     <a class="navlink" href={resolve("/editor")}>Editor →</a>
+    <a class="navlink" href={resolve("/teoria")}>Teoría →</a>
     <a class="navlink" href={resolve("/practica")}>Práctica →</a>
   </header>
 
@@ -73,11 +73,17 @@ import {
           <li>
             <b>{item.protocol}</b>
             <p>{item.line}</p>
-            <code>{item.doc}</code>
+            <a class="theory-link" href={resolve(item.href) + "#" + item.anchor}>
+              Leer →
+            </a>
           </li>
         {/each}
       </ul>
-      <p class="root mono">{LANDING_THEORY_ROOT}</p>
+      <p class="actions">
+        <a class="ghost" href={resolve("/teoria")}>
+          Ver la teoría completa →
+        </a>
+      </p>
     </section>
   </main>
 
@@ -439,10 +445,21 @@ import {
     line-height: 1.5;
   }
 
-  .root {
-    margin: 10px 0 0;
-    color: var(--dim);
-    font-size: 11.5px;
+  .theory-link {
+    color: var(--ink);
+    text-decoration: none;
+    border-bottom: 1px solid var(--line);
+    font-size: 12.5px;
+    white-space: nowrap;
+  }
+
+  .theory-link:hover {
+    color: var(--acc);
+    border-color: var(--acc);
+  }
+
+  .theory .actions {
+    margin-top: 14px;
   }
 
   .foot {

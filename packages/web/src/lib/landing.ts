@@ -11,6 +11,9 @@
 /** Ruta interna a la que apunta una card de la landing. */
 export type LandingHref = "/workbench" | "/editor" | "/practica";
 
+/** Ruta de la teoría en el sitio; las cards no la usan, la lista sí. */
+export type LandingTheoryHref = "/teoria";
+
 export interface LandingHero {
   eyebrow: string;
   title: string;
@@ -40,16 +43,23 @@ export interface LandingTheory {
   id: string;
   protocol: string;
   line: string;
-  /** Ruta del doc en el repo; los docs viven fuera del sitio. */
+  /** Ancla de la sección en `/teoria` (`#capa-2-arp`, …). */
+  anchor: string;
+  /** Destino del link: la página de teoría, nunca el `.md` del repo. */
+  href: LandingTheoryHref;
+  /**
+   * Doc del repo que origina la sección. Es procedencia, no destino: la
+   * landing no lo renderiza ni lo enlaza, el contenido se lee en `/teoria`.
+   */
   doc: string;
 }
 
-/** Prefijo de la teoría; se muestra como texto, no como link del sitio. */
+/** Prefijo de los docs de teoría en el repo (solo procedencia). */
 export const LANDING_THEORY_ROOT = "docs/teoria/";
 
-/** Por qué la teoría no es un link interno del build web. */
+/** La teoría se lee en el sitio: la landing enlaza la página, no los `.md`. */
 export const LANDING_THEORY_NOTE =
-  "La teoría vive en el repo, fuera de este sitio: esos archivos se leen desde el checkout o desde el remoto.";
+  "La teoría está en el sitio, en /teoria: cuatro secciones con el párrafo de cada protocolo, sus conceptos observables y los ejercicios para practicarla.";
 
 export const LANDING_HERO: LandingHero = {
   eyebrow: "Laboratorio de redes · corre entero en el navegador",
@@ -110,30 +120,41 @@ export const LANDING_STEPS: readonly LandingStep[] = [
   },
 ];
 
-/** Teoría por protocolo: los docs del repo, en el orden de las capas. */
+/**
+ * Teoría por protocolo, en el orden de las capas. Cada entrada enlaza su
+ * ancla en `/teoria`; el `doc` queda como procedencia del contenido.
+ */
 export const LANDING_THEORY: readonly LandingTheory[] = [
   {
     id: "capa-2-arp",
     protocol: "Capa 2 y ARP",
     line: "Tramas, MAC y cómo se resuelve un destino dentro del mismo segmento.",
+    anchor: "capa-2-arp",
+    href: "/teoria",
     doc: "docs/teoria/capa-2-arp.md",
   },
   {
     id: "ipv4-icmp",
     protocol: "IPv4 e ICMP",
     line: "Direccionamiento, máscara, routing entre subredes y el eco que viaja y vuelve.",
+    anchor: "ipv4-icmp",
+    href: "/teoria",
     doc: "docs/teoria/ipv4-icmp.md",
   },
   {
     id: "tcp",
     protocol: "TCP",
     line: "Handshake, ventana y retransmisión sobre el mismo cable que el resto.",
+    anchor: "tcp",
+    href: "/teoria",
     doc: "docs/teoria/tcp.md",
   },
   {
     id: "dns-dhcp",
     protocol: "DNS y DHCP",
     line: "Cómo un host consigue su IP y cómo se traduce un nombre antes del primer byte útil.",
+    anchor: "dns-dhcp",
+    href: "/teoria",
     doc: "docs/teoria/dns-dhcp.md",
   },
 ];

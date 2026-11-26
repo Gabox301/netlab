@@ -17,9 +17,10 @@ BASE_PATH=/Net-Lab/ bun run build # sitio servido desde /Net-Lab/
 - Acepta con o sin barra final; se normaliza a `""` o `/algo`
   (`packages/web/vite.config.ts`, plugin `sveltekit({ paths })`).
 - Salida en `packages/web/build/`: `index.html`, `workbench.html`,
-  `practica.html`, `editor.html`, `_app/` y el worker en
+  `teoria.html`, `practica.html`, `editor.html`, `_app/` y el worker en
   `_app/immutable/workers/sim.worker-<hash>.js`. `index.html` es la
-  landing (`/`) y el workbench vive en `/workbench`.
+  landing (`/`), el workbench vive en `/workbench` y la teoría en
+  `/teoria`.
 - El host de dev no cambia: esto es solo build/preview.
 
 **Windows + Git Bash:** MSYS reescribe los valores de entorno que
@@ -46,15 +47,16 @@ bun run build
 bun run preview   # http://127.0.0.1:4173
 ```
 
-`/`, `/workbench`, `/practica` y `/editor` responden 200 (y también
-`workbench.html` y `practica.html` sin depender del mapeo sin
-extensión). Alternativa con el binario, que sirve `packages/web/build`
-desde disco y no necesita el preview de Vite:
+`/`, `/workbench`, `/teoria`, `/practica` y `/editor` responden 200 (y
+también `workbench.html`, `teoria.html` y `practica.html` sin depender
+del mapeo sin extensión). Alternativa con el binario, que sirve
+`packages/web/build` desde disco y no necesita el preview de Vite:
 
 ```sh
 bun packages/cli/src/main.ts serve --port 8080
 # netlab listo en http://127.0.0.1:8080/
 curl -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/workbench  # 200
+curl -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/teoria     # 200
 curl -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/practica  # 200
 ```
 
@@ -89,9 +91,10 @@ El prefijo no está hardcodeado: el workflow lo deriva del nombre del
 repo (`Net-Lab` → `/Net-Lab`); si el repo es `<owner>.github.io`, usa la
 raíz. Pasos: `checkout`, `setup-bun` (1.4.5, igual que `ci.yml`),
 `bun install`, build con `BASE_PATH`, smoke del artefacto (el workflow
-chequea `index/practica/editor.html`; el build ahora también escribe
-`workbench.html`, la cuarta ruta prerenderizada) más el chunk del worker,
-`.nojekyll`, `upload-pages-artifact` y `deploy-pages`. `ci.yml` no se toca.
+chequea `index/practica/editor.html`; el build escribe también
+`workbench.html` y `teoria.html`: cinco rutas prerenderizadas en total)
+más el chunk del worker, `.nojekyll`, `upload-pages-artifact` y
+`deploy-pages`. `ci.yml` no se toca.
 
 El workflow no se ejecutó en este entorno (no hay remoto ni
 credenciales): el deploy real queda por verificar en el primer push a
@@ -110,18 +113,19 @@ para Pages.
 1. **Subpath y assets — resuelto por `BASE_PATH`.** Los HTML
    prerenderizados referencian `_app` de forma relativa y el cliente
    hornea `base`, así que `/Net-Lab/`, `/Net-Lab/workbench`,
-   `/Net-Lab/practica` y el worker cargan sin ajustes extra. Verificado
-   con el build `BASE_PATH=/Net-Lab/` servido bajo ese prefijo.
+   `/Net-Lab/teoria`, `/Net-Lab/practica` y el worker cargan sin ajustes
+   extra. Verificado con el build `BASE_PATH=/Net-Lab/` servido bajo ese
+   prefijo.
 2. **Enlaces de navegación con `resolve`.** Los `href` internos usan
    `resolve()` de `$app/paths` (`href={resolve("/workbench")}`,
    `href={resolve("/editor")}`), que antepone `base` en runtime, así que
    funcionan igual en raíz y bajo subpath. Con `base` vacío el HTML
    resultante es el mismo de siempre (`/workbench`, `/editor`).
 3. **Rutas planas.** El adaptador escribe `practica.html`, no
-   `practica/index.html` (igual con `workbench.html`); un server sin
-   fallback `.html` devuelve 404 al refrescar `/practica` o
-   `/workbench`. `netlab serve` ya lo maneja; en otros hosts, mapeá la
-   extensión o pedí `/practica.html`.
+   `practica/index.html` (igual con `workbench.html` y `teoria.html`); un
+   server sin fallback `.html` devuelve 404 al refrescar `/practica`,
+   `/workbench` o `/teoria`. `netlab serve` ya lo maneja; en otros hosts,
+   mapeá la extensión o pedí `/practica.html`.
 4. **Sin backend.** No hay `netlab serve` remoto ni WebSocket: importar
    escenarios, exportar pcap y correr la simulación pasan en el
    cliente.

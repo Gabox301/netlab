@@ -10,6 +10,7 @@
 - [x] L1 (S1) Landing en `/`: hero con qué es NetLab + contexto previo, cards a Workbench/Editor/Práctica, cómo empezar, links a teoría. Datos puros en `lib/landing.ts` con tests.
 - [x] L2 (S2) Mover workbench a `/workbench`: mover el archivo, actualizar todos los `resolve(\"/\")` rotulados Workbench y guías, más docs donde nombren rutas.
 - [x] L3 Verificación: pins de presencia, `tsc`, biome, suite completa 940/940, build raíz + BASE_PATH verdes (por el worker).
+- [x] L4 (S1) Teoría accesible en la página: nueva ruta `/teoria` que muestra el contenido de `docs/teoria` (capa 2, IPv4/ICMP, TCP, DNS/DHCP) con links a `/practica`; la landing enlaza a `/teoria` en vez de a los .md. Sin deep-links inventados (la práctica no direcciona ejercicios por URL).
 
 ## Log
 
