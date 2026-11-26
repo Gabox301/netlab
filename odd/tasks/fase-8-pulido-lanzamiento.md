@@ -14,7 +14,7 @@ Slice vertical ODD sobre netlab-roadmap.md § Fase 8 (líneas 789-800). Sin ataj
 - [x] T3 (S1) Tutorial interactivo bienvenida (primera visita persistida, overlay/golden path replay/pcap).
 - [x] T4 (S1) Sitio docs + README: teoría por protocolo enlazada a ejercicios + README actualizado a estado real.
 - [ ] T5 (S1) Demo pública: base path configurable + config deploy estático + worker verificado.
-- [ ] T6 (S1) Post técnico + guion video 60-90s (consolida odd/tasks/fase-5-tcp.md y fase-7).
+- [x] T6 (S1) Post técnico + guion video 60-90s (consolida odd/tasks/fase-5-tcp.md y fase-7).
 
 ## Log
 
