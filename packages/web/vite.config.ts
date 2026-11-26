@@ -24,7 +24,17 @@ export default defineConfig({
   plugins: [
     sveltekit({
       preprocess: vitePreprocess(),
-      adapter: adapter({ precompress: false, strict: true }),
+      // SPA fallback: GitHub Pages serves `404.html` for any path it does not
+      // find, and SvelteKit boots the client router from that shell. Every
+      // route is still prerendered to its own HTML file (the `pages.yml`
+      // smoke asserts the five of them), so `404.html` only covers deep links
+      // a static host cannot resolve. Note that passing `fallback` skips
+      // adapter-static's dynamic-routes check, hence that CI assertion.
+      adapter: adapter({
+        precompress: false,
+        strict: true,
+        fallback: "404.html",
+      }),
       paths: { base: resolveBase(process.env.BASE_PATH) },
     }),
   ],
