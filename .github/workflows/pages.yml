@@ -31,14 +31,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.5"
 
       - name: Resolve base path
         id: pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - run: bun install
 
@@ -71,7 +71,7 @@ jobs:
           : > "$build/.nojekyll"
           echo "static build ok: $(find "$build" -type f | wc -l) files"
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: packages/web/build
           # `.nojekyll` es un archivo oculto y el artefacto los ignora por
@@ -86,4 +86,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
