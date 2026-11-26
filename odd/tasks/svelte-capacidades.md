@@ -7,9 +7,9 @@
 
 ## Tasks
 
-- [ ] C1 (S2a) Auditoría SSR-safety (read-only): APIs de browser fuera de `onMount`/guards en rutas y lib; veredicto prender-SSR vs SPA+fallback.
-- [ ] C2 (S2b) `svelte-check` en devDeps + job CI; baseline en verde.
-- [ ] C3 (S2c) `pages.yml` según receta oficial + `fallback: 404.html` + `docs/demo.md` al día.
+- [x] C1 (S2a) Auditoría SSR-safety (read-only): APIs de browser fuera de `onMount`/guards en rutas y lib; veredicto prender-SSR vs SPA+fallback.
+- [x] C2 (S2b) `svelte-check` en devDeps + job CI; baseline en verde.
+- [x] C3 (S2c) `pages.yml` según receta oficial + `fallback: 404.html` + `docs/demo.md` al día.
 
 ## Log
 
