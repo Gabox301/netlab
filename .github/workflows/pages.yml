@@ -1,0 +1,78 @@
+name: pages
+
+# Fase 8 T5: demo pública de NetLab en GitHub Pages.
+# La simulación corre en un Web Worker, así que el sitio es 100 % estático: no
+# hay backend ni WebSocket, solo archivos. El prefijo desde el que se sirve
+# (GitHub Pages usa "/<repo>") entra por BASE_PATH y lo consume
+# packages/web/svelte.config.js; vacío significa raíz.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Un deploy a la vez, y sin cancelar el que ya está publicando.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.5"
+
+      - run: bun install
+
+      # Un project site vive en /<repo>/; el sitio raíz (<owner>.github.io) no
+      # lleva prefijo. El nombre del repo es el prefijo real de Pages, así que
+      # no se hardcodea.
+      - name: Resolve base path
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY#*/}"
+          if [[ "$repo" == *.github.io ]]; then
+            base=""
+          else
+            base="/$repo"
+          fi
+          echo "BASE_PATH=$base" >> "$GITHUB_ENV"
+          echo "base path: '${base}' (repo: $repo)"
+
+      - name: Build static UI
+        working-directory: packages/web
+        run: bun run build
+
+      # Smoke del artefacto: las tres rutas prerenderizadas y el chunk del
+      # worker existen. Si BASE_PATH rompiera el build, esto falla antes de
+      # publicar.
+      - name: Verify static output
+        run: |
+          set -euo pipefail
+          build=packages/web/build
+          for page in index practica editor; do
+            test -f "$build/$page.html"
+          done
+          ls "$build"/_app/immutable/workers/sim.worker-*.js > /dev/null
+          # Defensivo: si el sitio se procesara como Jekyll, `_app` se
+          # ignoraría por empezar con guion bajo.
+          : > "$build/.nojekyll"
+          echo "static build ok: $(find "$build" -type f | wc -l) files"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: packages/web/build
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

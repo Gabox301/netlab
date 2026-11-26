@@ -9,6 +9,7 @@ import {
   type SubnetTopic,
 } from "@netlab/exercises";
 import { onMount } from "svelte";
+import { base } from "$app/paths";
 import {
   emptyPracticeStore,
   emptyProgress,
@@ -431,8 +432,8 @@ function submitSubnet(event: SubmitEvent): void {
       modo práctica · {PRACTICE_ROUTES.length} rutas · {PRACTICE_EXERCISES.length}
       ejercicios
     </div>
-    <a class="navlink" href="/">← Workbench</a>
-    <a class="navlink" href="/editor">Editor →</a>
+    <a class="navlink" href="{base}/">← Workbench</a>
+    <a class="navlink" href="{base}/editor">Editor →</a>
     <div class="sp"></div>
     <span class="counter mono">{solved}/{PRACTICE_EXERCISES.length} resueltos</span>
     <span
@@ -719,7 +720,7 @@ function submitSubnet(event: SubmitEvent): void {
         <section class="card validation">
           <h2>Validar solución <span class="tag">F-112</span></h2>
           <p class="card-lede">
-            Exportá la topología desde el <a href="/editor">editor</a> y subí
+            Exportá la topología desde el <a href="{base}/editor">editor</a> y subí
             el JSON v1. El worker corre la simulación con el mismo
             <code>runScenario</code> que <code>netlab validate</code> y devuelve
             los checks, no un replay.

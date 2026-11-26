@@ -1,4 +1,5 @@
 <script lang="ts">
+import { base } from "$app/paths";
 import type { ScenarioAction, ScenarioPingAction } from "../../lib/topology";
 import {
   ALIGN_MODES,
@@ -1889,7 +1890,7 @@ function exportJson(): void {
     </div>
     <div class="sp"></div>
     <span class="pill">autosave local</span>
-    <a class="linkbtn" href="/">Workbench</a>
+    <a class="linkbtn" href="{base}/">Workbench</a>
     <button type="button" onclick={loadExample}>Ejemplo</button>
     <button type="button" onclick={openImport}>Importar JSON</button>
     <input
