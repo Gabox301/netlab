@@ -11,12 +11,13 @@ import { defineConfig } from "vite";
  * an empty value (or `/`) keeps the root-relative default: `bun run build` with
  * no `BASE_PATH` produces exactly the same site as before this option existed.
  */
-function resolveBase(raw: string | undefined): string {
+function resolveBase(raw: string | undefined): "" | `/${string}` {
   const trimmed = (raw ?? "").trim().replace(/\/+$/, "");
   if (trimmed === "") {
     return "";
   }
-  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  const withSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  return withSlash as `/${string}`;
 }
 
 export default defineConfig({
