@@ -1419,7 +1419,7 @@ function onJitterChange(link: TopologyLink, event: Event): void {
   const input = event.currentTarget as HTMLInputElement;
   const text = input.value.trim();
   if (text === "") {
-    link.params.jitterUs = undefined;
+    delete link.params.jitterUs;
     return;
   }
   const value = Number(text);
@@ -1441,7 +1441,7 @@ function onRateChange(
   const input = event.currentTarget as HTMLInputElement;
   const text = input.value.trim();
   if (text === "") {
-    link.params[field] = undefined;
+    delete link.params[field];
     return;
   }
   const value = Number(text);
@@ -1459,7 +1459,7 @@ function onBandwidthChange(link: TopologyLink, event: Event): void {
   const input = event.currentTarget as HTMLInputElement;
   const text = input.value.trim();
   if (text === "") {
-    link.params.bandwidthBps = undefined;
+    delete link.params.bandwidthBps;
     return;
   }
   const value = Number(text);
@@ -1479,7 +1479,7 @@ function onMtuChange(link: TopologyLink, event: Event): void {
   const input = event.currentTarget as HTMLInputElement;
   const text = input.value.trim();
   if (text === "") {
-    link.params.mtuBytes = undefined;
+    delete link.params.mtuBytes;
     return;
   }
   const value = Number(text);
@@ -1497,7 +1497,7 @@ function onQueueLimitChange(link: TopologyLink, event: Event): void {
   const input = event.currentTarget as HTMLInputElement;
   const text = input.value.trim();
   if (text === "") {
-    link.params.queueLimit = undefined;
+    delete link.params.queueLimit;
     return;
   }
   const value = Number(text);
@@ -1516,13 +1516,13 @@ function onQueueLimitChange(link: TopologyLink, event: Event): void {
 function onAddBurst(link: TopologyLink): void {
   checkpoint();
   link.params.burst = { pGoodToBad: 0.02, pBadToGood: 0.4 };
-  link.params.lossRate = undefined;
+  delete link.params.lossRate;
   setNotice("info", `Cable ${link.id}: ráfagas activas (reemplazan pérdida).`);
 }
 
 function onClearBurst(link: TopologyLink): void {
   checkpoint();
-  link.params.burst = undefined;
+  delete link.params.burst;
 }
 
 function onBurstField(
