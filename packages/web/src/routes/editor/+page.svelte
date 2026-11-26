@@ -3141,7 +3141,6 @@ function exportJson(): void {
     background: var(--bg);
     color: var(--ink);
     font: 14px var(--sans);
-    overflow: hidden;
     -webkit-font-smoothing: antialiased;
   }
 
