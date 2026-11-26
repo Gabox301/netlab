@@ -88,8 +88,15 @@ jobs:
           status=0
           echo "--- diagnostico de entorno ---"
           id; umask; which -a tshark || true
+          dpkg -S /usr/bin/tshark 2>/dev/null || true
           ls -la pcaps/
           for f in pcaps/*.pcap pcaps/*.pcapng; do namei -l "$f" || true; done
+          echo "--- experimento EACCES (una sola corrida) ---"
+          cat pcaps/dns.pcap > /dev/null && echo "runner lee el archivo OK"
+          cp pcaps/dns.pcap /tmp/dns-probe.pcap && echo "copia a /tmp OK"
+          tshark -r /tmp/dns-probe.pcap -q -c 1 > /dev/null && echo "tshark abre /tmp OK" || echo "tshark TAMBIEN falla en /tmp"
+          tshark -r "$PWD/pcaps/dns.pcap" -q -c 1 > /dev/null && echo "ruta absoluta OK" || echo "ruta absoluta falla"
+          rm -f /tmp/dns-probe.pcap
           for f in pcaps/*.pcap pcaps/*.pcapng; do
             echo "::group::tshark -r $f -q -z expert"
             tshark -r "$f" -q -z expert || status=1
