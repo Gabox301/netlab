@@ -144,14 +144,8 @@ import {
     color: var(--acc);
   }
 
-  code,
   .mono {
     font-family: var(--mono);
-  }
-
-  code {
-    color: var(--warn);
-    font-size: 0.92em;
   }
 
   .shell {
@@ -464,10 +458,6 @@ import {
   .theory-link:hover {
     color: var(--acc);
     border-color: var(--acc);
-  }
-
-  .theory .actions {
-    margin-top: 14px;
   }
 
   .foot {
