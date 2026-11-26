@@ -4,7 +4,7 @@ name: pages
 # La simulación corre en un Web Worker, así que el sitio es 100 % estático: no
 # hay backend ni WebSocket, solo archivos. El prefijo desde el que se sirve
 # (GitHub Pages usa "/<repo>") entra por BASE_PATH y lo consume
-# packages/web/svelte.config.js; vacío significa raíz.
+# packages/web/vite.config.ts (plugin sveltekit); vacío significa raíz.
 
 on:
   push:

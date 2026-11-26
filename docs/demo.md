@@ -15,7 +15,7 @@ BASE_PATH=/Net-Lab/ bun run build # sitio servido desde /Net-Lab/
 
 - `BASE_PATH` sin setear, vacío o `/` = raíz. El default no cambió.
 - Acepta con o sin barra final; se normaliza a `""` o `/algo`
-  (`packages/web/svelte.config.js`, `kit.paths.base`).
+  (`packages/web/vite.config.ts`, plugin `sveltekit({ paths })`).
 - Salida en `packages/web/build/`: `index.html`, `practica.html`,
   `editor.html`, `_app/` y el worker en
   `_app/immutable/workers/sim.worker-<hash>.js`.
@@ -108,10 +108,11 @@ para Pages.
    hornea `base`, así que `/Net-Lab/`, `/Net-Lab/practica` y el worker
    cargan sin ajustes extra. Verificado con el build
    `BASE_PATH=/Net-Lab/` servido bajo ese prefijo.
-2. **Enlaces de navegación con `base`.** Los `href` internos usan
-   `base` de `$app/paths` (`href="{base}/editor"`), así que funcionan
-   igual en raíz y bajo subpath. Con `base` vacío el HTML resultante
-   es idéntico al anterior (`/editor`).
+2. **Enlaces de navegación con `resolve`.** Los `href` internos usan
+   `resolve()` de `$app/paths` (`href={resolve("/editor")}`), que
+   antepone `base` en runtime, así que funcionan igual en raíz y
+   bajo subpath. Con `base` vacío el HTML resultante es idéntico al
+   anterior (`/editor`).
 3. **Rutas planas.** El adaptador escribe `practica.html`, no
    `practica/index.html`; un server sin fallback `.html` devuelve 404 al
    refrescar `/practica`. `netlab serve` ya lo maneja; en otros hosts,

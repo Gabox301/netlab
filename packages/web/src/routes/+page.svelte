@@ -1,6 +1,6 @@
 <script lang="ts">
 import { onMount } from "svelte";
-import { base } from "$app/paths";
+import { resolve } from "$app/paths";
 import { workbenchStatus } from "../lib/a11y";
 import {
   buildHexLines,
@@ -1044,8 +1044,8 @@ function isNodeActive(id: string): boolean {
     <div class="scen mono">
       {result?.scenario ?? "dos-subredes"}.json · seed {result?.seed ?? 11}
     </div>
-    <a class="navlink" href="{base}/editor">Editor →</a>
-    <a class="navlink" href="{base}/practica">Práctica →</a>
+    <a class="navlink" href={resolve("/editor")}>Editor →</a>
+    <a class="navlink" href={resolve("/practica")}>Práctica →</a>
     <button
       class="navlink"
       type="button"

@@ -20,3 +20,4 @@ Slice vertical ODD sobre netlab-roadmap.md § Fase 8 (líneas 789-800). Sin ataj
 
 - L1: "Si." (autorización Fase 8, sigue a checkpoint Fases 0-7 completas en 3a470ad)
 - L2: "Los commits deben ser de cada tarea, no todo junto." → T3–T6 se commitean por separado al verificarse cada uno.
+- L3: bump de versiones del usuario (TS 7, SvelteKit 3, Vite 8) → migrar config al plugin (`sveltekit({})` en `vite.config.ts`, TS `^6` por compiler API, `resolve()` en vez de `base` de `$app/paths`).

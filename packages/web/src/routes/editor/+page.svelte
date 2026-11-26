@@ -1,5 +1,5 @@
 <script lang="ts">
-import { base } from "$app/paths";
+import { resolve } from "$app/paths";
 import {
   EDITOR_HELP_SHORTCUTS,
   EDITOR_HELP_STEPS,
@@ -1990,7 +1990,7 @@ function exportJson(): void {
     >
       <span aria-hidden="true">?</span> {HELP_MESSAGES.open}
     </button>
-    <a class="linkbtn" href="{base}/">Workbench</a>
+    <a class="linkbtn" href={resolve("/")}>Workbench</a>
     <button type="button" onclick={loadExample}>Ejemplo</button>
     <button type="button" onclick={openImport}>Importar JSON</button>
     <input
