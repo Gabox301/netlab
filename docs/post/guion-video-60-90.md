@@ -160,8 +160,8 @@ y el repo: no se promete una URL que no responde.
 
 ## Chequeo de exactitud de lo afirmado
 
-Los archivos que la tarea T3 está tocando en paralelo (`+page.svelte`,
-`svelte.config.js`) pueden moverse de línea: ahí se cita el símbolo, que es lo
+Los archivos que otras tareas tocaron en paralelo (`+page.svelte`,
+`vite.config.ts`) pueden moverse de línea: ahí se cita el símbolo, que es lo
 estable. El resto va con línea exacta.
 
 - Encabezado del workbench (`NetLab`, `dos-subredes.json · seed 11`,
