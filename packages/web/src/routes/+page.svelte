@@ -1,5 +1,6 @@
 <script lang="ts">
 import { onMount } from "svelte";
+import { workbenchStatus } from "../lib/a11y";
 import {
   buildHexLines,
   buildPackets,
@@ -845,6 +846,14 @@ function isNodeActive(id: string): boolean {
 <svelte:window onkeydown={onReplayKey} />
 
 <div class="shell">
+  <a class="skip" href="#filter-expr">Saltar a la lista de paquetes</a>
+  <div class="sr-only" role="status" aria-live="polite"
+    >{workbenchStatus({
+      loading,
+      errored: error !== null,
+      total: packets.length,
+      selectedT: selectedPacket?.t ?? null,
+    })}</div>
   <header class="top">
     <div class="logo">Net<b>Lab</b></div>
     <div class="scen mono">
@@ -1427,7 +1436,7 @@ function isNodeActive(id: string): boolean {
     --line: #34343c;
     --ink: #ffffff;
     --mut: #b4b4be;
-    --dim: #80808c;
+    --dim: #9d9da6;
     --acc: #ff4d3d;
     --ok: #4dff9a;
     --warn: #ffd23d;
@@ -2272,6 +2281,41 @@ function isNodeActive(id: string): boolean {
 
     .simtime {
       text-align: left;
+    }
+  }
+  /* Fase 8 T2: skip-link, región de estado y movimiento reducido. */
+  .skip {
+    position: absolute;
+    left: 0.5rem;
+    top: -3rem;
+    z-index: 50;
+    background: #16161a;
+    color: #f2f2f5;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #4da3ff;
+    border-radius: 0.375rem;
+    transition: top 0.15s;
+  }
+  .skip:focus-visible {
+    top: 0.5rem;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
     }
   }
 </style>

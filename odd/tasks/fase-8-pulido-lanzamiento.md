@@ -10,7 +10,7 @@ Slice vertical ODD sobre netlab-roadmap.md § Fase 8 (líneas 789-800). Sin ataj
 ## Tasks
 
 - [x] T1 (S1) Benchmarks: `netlab bench` (eventos/s, memoria RSS, throughput TCP) + tabla publicada + job CI.
-- [ ] T2 (S1) Accesibilidad: skip-link, `prefers-reduced-motion`, anuncios estado, contraste AA, tests a11y en web.
+- [x] T2 (S1) Accesibilidad: skip-link, `prefers-reduced-motion`, anuncios estado, contraste AA, tests a11y en web.
 - [ ] T3 (S1) Tutorial interactivo bienvenida (primera visita persistida, overlay/golden path replay/pcap).
 - [ ] T4 (S1) Sitio docs + README: teoría por protocolo enlazada a ejercicios + README actualizado a estado real.
 - [ ] T5 (S1) Demo pública: base path configurable + config deploy estático + worker verificado.
