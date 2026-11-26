@@ -1,0 +1,11 @@
+# Normalizar finales de línea a LF en el repo (biome exige LF;
+# las herramientas en Windows tienden a escribir CRLF).
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.webp binary
+*.gz binary
+*.br binary
+*.pcap binary
+*.pcapng binary
+*.woff2 binary

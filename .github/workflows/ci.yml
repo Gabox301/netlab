@@ -67,7 +67,9 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark
       - name: Generate captures with the CLI
         run: |
+          set -euo pipefail
           echo "tshark is the S2 oracle here; without it locally, run bun test for the structural checks"
+          id -u; umask
           mkdir -p pcaps
           bun packages/cli/src/main.ts pcap packages/cli/fixtures/dos-subredes.json -o pcaps/icmp.pcap --until 100ms
           bun packages/cli/src/main.ts pcap packages/exercises/solutions/svc-dns-broken.json -o pcaps/dns.pcap --until 100ms
@@ -75,6 +77,12 @@ jobs:
           # pcapng: one interface per link, and per-link selection (F-121, F-122).
           bun packages/cli/src/main.ts pcap packages/cli/fixtures/dos-subredes.json -o pcaps/icmp.pcapng --until 100ms --format pcapng
           bun packages/cli/src/main.ts pcap packages/cli/fixtures/dos-subredes.json -o pcaps/icmp-l1.pcapng --until 100ms --format pcapng --link l1
+          ls -la pcaps/
+          chmod a+r pcaps/*
+          for f in pcaps/icmp.pcap pcaps/dns.pcap pcaps/tcp.pcap pcaps/icmp.pcapng pcaps/icmp-l1.pcapng; do
+            test -s "$f" || { echo "::error::missing or empty $f"; exit 1; }
+            test -r "$f" || { echo "::error::unreadable $f"; exit 1; }
+          done
       - name: tshark opens every capture without errors or checksum warnings
         run: |
           status=0
