@@ -79,11 +79,6 @@ import {
           </li>
         {/each}
       </ul>
-      <p class="actions">
-        <a class="ghost" href={resolve("/teoria")}>
-          Ver la teoría completa →
-        </a>
-      </p>
     </section>
   </main>
 
