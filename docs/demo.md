@@ -61,6 +61,13 @@ se verifica con un server estático montado en `/Net-Lab/` que mapee
 `/practica` → `practica.html` (por ejemplo `try_files $uri $uri.html` en
 nginx), o directamente en el deploy.
 
+> **Nota:** `packages/web/build/` no se commitea (está en
+> `.gitignore`) y `packages/cli/src/manifest.gen.ts` se genera desde
+> ese build (`bun packages/cli/scripts/gen-manifest.ts`, o vía el
+> script `compile` del CLI) cada vez que se arma el binario con la UI
+> embebida. Si cambiás la web y vas a distribuir el binario,
+> regenerá el manifest antes de compilar.
+
 Worker: en DevTools → Network, recargar y confirmar
 `sim.worker-<hash>.js` con 200 y sin requests a otro origen; el trabajo
 de simulación aparece en el perfil fuera del hilo principal. El chunk se
