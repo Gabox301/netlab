@@ -139,6 +139,9 @@ describe("pins de presencia: landing en /, workbench en /workbench (S2)", () => 
     expect(text).toContain('class="skip"');
     expect(text).toContain('href="#modos"');
     expect(text).toContain('resolve("/workbench")');
+    expect(text).toContain('class="hero-logo"');
+    expect(text).toContain('asset("logo.webp")');
+    expect(text).toContain('alt="Logo de NetLab"');
   });
 
   test("la landing ya no contiene la simulación: el workbench se mudó", () => {
@@ -187,5 +190,22 @@ describe("pins de presencia: landing en /, workbench en /workbench (S2)", () => 
     expect(
       readFileSync(routeFile("practica", "+page.svelte"), "utf8"),
     ).toContain('resolve("/workbench")}>← Workbench');
+  });
+
+  test("app.html sirve favicons, manifest y marca", () => {
+    const text = readFileSync(
+      fileURLToPath(new URL("../src/app.html", import.meta.url)),
+      "utf8",
+    );
+    for (const needle of [
+      "favicon-32x32.png",
+      "favicon-16x16.png",
+      "favicon.ico",
+      "apple-touch-icon.png",
+      "site.webmanifest",
+      'name="theme-color"',
+    ]) {
+      expect(text).toContain(needle);
+    }
   });
 });

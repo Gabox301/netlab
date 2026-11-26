@@ -1,5 +1,7 @@
 # NetLab — Laboratorio de redes interactivo con stack TCP/IP propio
 
+![Logo de NetLab](packages/web/static/logo.webp)
+
 > Runtime: **Bun**. Lenguaje: **TypeScript**.
 
 NetLab simula redes Ethernet/IP desde los bytes: implementa Ethernet, ARP, IPv4,

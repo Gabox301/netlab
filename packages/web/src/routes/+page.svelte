@@ -1,5 +1,5 @@
 <script lang="ts">
-import { resolve } from "$app/paths";
+import { asset, resolve } from "$app/paths";
 import {
   LANDING_CARDS,
   LANDING_HERO,
@@ -28,6 +28,13 @@ import {
 
   <main class="landing">
     <section class="hero" aria-labelledby="hero-title">
+      <img
+        class="hero-logo"
+        src={asset("logo.webp")}
+        alt="Logo de NetLab"
+        width="84"
+        height="84"
+      />
       <p class="eyebrow mono">{LANDING_HERO.eyebrow}</p>
       <h1 id="hero-title">{LANDING_HERO.title}</h1>
       <p class="lede">{LANDING_HERO.lede}</p>
@@ -228,6 +235,12 @@ import {
     flex-direction: column;
     gap: 12px;
     max-width: 76ch;
+  }
+
+  .hero-logo {
+    width: 84px;
+    height: auto;
+    border-radius: 18px;
   }
 
   .eyebrow {
