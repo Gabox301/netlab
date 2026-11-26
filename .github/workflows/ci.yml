@@ -16,6 +16,36 @@ jobs:
       - run: bun test
       - run: bunx tsc --noEmit
       - run: bunx biome check .
+      - run: bun run --filter @netlab/web check
+
+  # Fase 8 T1: puerta de regresión de rendimiento del motor. Los conteos
+  # son deterministas (semilla 42); pared y RSS solo se reportan.
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.5"
+      - run: bun install
+      - name: Run engine benchmarks (small)
+        run: |
+          bun packages/cli/src/main.ts bench --size small --format human
+          bun packages/cli/src/main.ts bench --size small --format json > bench.json
+      - name: Assert positive events and bytes
+        run: |
+          bun -e '
+            const fs = await import("node:fs/promises");
+            const lines = (await fs.readFile("bench.json", "utf8")).trim().split("\n");
+            if (lines.length !== 2) throw new Error(`expected 2 workloads, got ${lines.length}`);
+            for (const line of lines) {
+              const r = JSON.parse(line);
+              if (!(r.events > 0)) throw new Error(`${r.workload}: events <= 0`);
+              if (!(r.txBytes > 0)) throw new Error(`${r.workload}: txBytes <= 0`);
+              if (!(r.eventsPerSec > 0)) throw new Error(`${r.workload}: eventsPerSec <= 0`);
+            }
+            console.log("bench gate ok:", lines.length, "workloads");
+          '
 
   # S2 oracle for F-120 to F-122: a third-party dissector has to open the
   # captures the CLI writes, in both encodings. `bun test` pins the bytes and

@@ -33,3 +33,4 @@ packages/cli/src/manifest.gen.ts
 # IDE
 .vscode/
 .idea/
+.pi
