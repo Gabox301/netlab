@@ -11,6 +11,11 @@
  * Igual que el progreso de Práctica, leer y escribir nunca lanzan: storage
  * deshabilitado, modo privado y el prerender estático leen como "primera
  * visita", y una escritura rechazada se descarta.
+ *
+ * La navegación de pasos (`clampStepIndex`, `stepAt`, `stepProgressLabel`,
+ * `stepPrimaryLabel`, `nextStepIndex`, `previousStepIndex`) es genérica y la
+ * comparte el overlay de ayuda contextual de `lib/help.ts`: un solo lugar
+ * define cómo se clampea un índice, no dos copias del mismo cálculo.
  */
 
 /** Clave de storage del documento del tutorial. */
@@ -136,38 +141,82 @@ export function shouldShowTutorial(storageValue: string | null): boolean {
   return parseTutorialState(storageValue) === null;
 }
 
-function clampIndex(value: number): number {
-  if (!Number.isFinite(value)) {
+/* Navegación de pasos compartida con `lib/help.ts` -------------------------- */
+
+/**
+ * Índice dentro de `[0, total - 1]`: un índice no finito cae en el primero.
+ * `total` es la cantidad real de pasos del overlay que navega.
+ */
+export function clampStepIndex(index: number, total: number): number {
+  const last = Math.max(total - 1, 0);
+  if (!Number.isFinite(index)) {
     return 0;
   }
-  return Math.min(Math.max(Math.floor(value), 0), TUTORIAL_STEPS.length - 1);
+  return Math.min(Math.max(Math.floor(index), 0), last);
 }
+
+/** La copia que un overlay de pasos necesita para su botón primario. */
+export interface StepMessages {
+  next: string;
+  finish: string;
+}
+
+/** Paso en `index` dentro de `steps`, con clamp: nunca devuelve `undefined`. */
+export function stepAt<T>(steps: readonly T[], index: number): T {
+  return steps[clampStepIndex(index, steps.length)] as T;
+}
+
+/** Etiqueta de progreso: `Paso N de M`, con clamp al rango real. */
+export function stepProgressLabel(index: number, total: number): string {
+  return `Paso ${clampStepIndex(index, total) + 1} de ${Math.max(total, 1)}`;
+}
+
+/** Etiqueta del botón primario: avanza, o cierra en el último paso. */
+export function stepPrimaryLabel(
+  index: number,
+  total: number,
+  messages: StepMessages,
+): string {
+  return clampStepIndex(index, total) === Math.max(total - 1, 0)
+    ? messages.finish
+    : messages.next;
+}
+
+/** Índice siguiente, sin pasarse del último paso. */
+export function nextStepIndex(index: number, total: number): number {
+  return Math.min(clampStepIndex(index, total) + 1, Math.max(total - 1, 0));
+}
+
+/** Índice anterior, sin bajar del primero. */
+export function previousStepIndex(index: number, total: number): number {
+  return Math.max(clampStepIndex(index, total) - 1, 0);
+}
+
+/* Tutorial de bienvenida (Fase 8 T3) -------------------------------------- */
 
 /** Paso en `index`, con clamp: nunca devuelve `undefined`. */
 export function tutorialStepAt(index: number): TutorialStep {
-  return TUTORIAL_STEPS[clampIndex(index)] as TutorialStep;
+  return stepAt(TUTORIAL_STEPS, index);
 }
 
 /** Etiqueta de progreso: `Paso N de M`, con clamp al rango real. */
 export function tutorialProgressLabel(index: number): string {
-  return `Paso ${clampIndex(index) + 1} de ${TUTORIAL_STEPS.length}`;
+  return stepProgressLabel(index, TUTORIAL_STEPS.length);
 }
 
 /** Etiqueta del botón primario: avanza, o cierra en el último paso. */
 export function tutorialNextLabel(index: number): string {
-  return clampIndex(index) === TUTORIAL_STEPS.length - 1
-    ? TUTORIAL_MESSAGES.finish
-    : TUTORIAL_MESSAGES.next;
+  return stepPrimaryLabel(index, TUTORIAL_STEPS.length, TUTORIAL_MESSAGES);
 }
 
 /** Índice siguiente, sin pasarse del último paso. */
 export function nextTutorialStep(index: number): number {
-  return Math.min(clampIndex(index) + 1, TUTORIAL_STEPS.length - 1);
+  return nextStepIndex(index, TUTORIAL_STEPS.length);
 }
 
 /** Índice anterior, sin bajar del primero. */
 export function previousTutorialStep(index: number): number {
-  return Math.max(clampIndex(index) - 1, 0);
+  return previousStepIndex(index, TUTORIAL_STEPS.length);
 }
 
 /** Browser storage cuando existe; `null` en workers, tests y prerender. */

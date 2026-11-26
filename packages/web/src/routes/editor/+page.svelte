@@ -1,5 +1,15 @@
 <script lang="ts">
 import { base } from "$app/paths";
+import {
+  EDITOR_HELP_SHORTCUTS,
+  EDITOR_HELP_STEPS,
+  HELP_MESSAGES,
+  helpNextLabel,
+  helpProgressLabel,
+  helpStepAt,
+  nextHelpStep,
+  previousHelpStep,
+} from "../../lib/help";
 import type { ScenarioAction, ScenarioPingAction } from "../../lib/topology";
 import {
   ALIGN_MODES,
@@ -188,6 +198,13 @@ const AT_DURATION_RE = /^\d+(?:\.\d+)?\s*(?:us|µs|μs|ms|s|m)?$/i;
 
 let svgEl: SVGSVGElement | null = null;
 let fileInput: HTMLInputElement | null = null;
+
+/* Ayuda contextual (A1): tour de pasos + atajos, sin estado persistido. ----- */
+let helpOpen = $state(false);
+let helpStep = $state(0);
+let helpCard = $state<HTMLDivElement | null>(null);
+let helpTrigger = $state<HTMLButtonElement | null>(null);
+let helpReturnFocus: HTMLElement | null = null;
 
 /** Names waiting to be duplicated again; never the topology nodes themselves. */
 let clipboard = $state<Array<string> | null>(null);
@@ -1016,7 +1033,82 @@ $effect(() => {
   return () => el.removeEventListener("wheel", onWheel);
 });
 
+/* Ayuda contextual (A1) ----------------------------------------------------
+ * El patrón es el mismo del tutorial del workbench (`routes/+page.svelte`):
+ * overlay fijo, foco al diálogo, Tab atrapado adentro, Esc cierra y el foco
+ * vuelve al botón que lo abrió. Los pasos y los atajos son datos puros de
+ * `lib/help.ts`, así que acá solo queda el cableado de la vista.
+ */
+
+function openHelp(trigger: HTMLElement | null = null): void {
+  helpReturnFocus = trigger ?? helpTrigger;
+  helpStep = 0;
+  helpOpen = true;
+}
+
+function closeHelp(): void {
+  helpOpen = false;
+  const back = helpReturnFocus ?? helpTrigger;
+  helpReturnFocus = null;
+  back?.focus();
+}
+
+function advanceHelp(): void {
+  if (helpStep >= EDITOR_HELP_STEPS.length - 1) {
+    closeHelp();
+    return;
+  }
+  helpStep = nextHelpStep(helpStep);
+}
+
+function retreatHelp(): void {
+  helpStep = previousHelpStep(helpStep);
+  if (helpStep === 0) {
+    helpCard?.focus();
+  }
+}
+
+function onHelpKey(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    // El canvas también escucha Escape en window: el modal se queda con la tecla.
+    event.preventDefault();
+    event.stopPropagation();
+    closeHelp();
+    return;
+  }
+  if (event.key !== "Tab" || helpCard === null) {
+    return;
+  }
+  const focusables = [
+    ...helpCard.querySelectorAll<HTMLElement>("button:not(:disabled)"),
+  ];
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (first === undefined || last === undefined) {
+    return;
+  }
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || active === helpCard)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+/** El foco entra al diálogo apenas el card existe, como en el tutorial. */
+$effect(() => {
+  if (helpOpen && helpCard !== null) {
+    helpCard.focus();
+  }
+});
+
 function onWindowKeyDown(event: KeyboardEvent): void {
+  // Mientras el modal de ayuda está abierto, el lienzo no atiende atajos.
+  if (helpOpen) {
+    return;
+  }
   const mod = event.ctrlKey || event.metaKey;
   if (mod && (event.key === "z" || event.key === "Z")) {
     // Inside a field the native text undo wins; elsewhere undo the canvas.
@@ -1890,6 +1982,14 @@ function exportJson(): void {
     </div>
     <div class="sp"></div>
     <span class="pill">autosave local</span>
+    <button
+      type="button"
+      bind:this={helpTrigger}
+      onclick={(event) => openHelp(event.currentTarget)}
+      title={HELP_MESSAGES.openTitle}
+    >
+      <span aria-hidden="true">?</span> {HELP_MESSAGES.open}
+    </button>
     <a class="linkbtn" href="{base}/">Workbench</a>
     <button type="button" onclick={loadExample}>Ejemplo</button>
     <button type="button" onclick={openImport}>Importar JSON</button>
@@ -2921,7 +3021,8 @@ function exportJson(): void {
         <p>
           Arrastrá un dispositivo desde la barra izquierda o cargá el ejemplo
           para ver el flujo dibujar → exportar → netlab run. O elegí una plantilla
-          en el panel Escenario.
+          en el panel Escenario. El tour de pasos y los atajos están en
+          <b>? {HELP_MESSAGES.open}</b>.
         </p>
         <div class="row center">
           <button type="button" onclick={loadExample}>Cargar ejemplo</button>
@@ -2930,6 +3031,58 @@ function exportJson(): void {
       </div>
     {/if}
   </main>
+
+  {#if helpOpen}
+    {@const step = helpStepAt(helpStep)}
+    <div class="help-layer">
+      <div
+        class="help-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label={HELP_MESSAGES.dialogLabel}
+        tabindex="-1"
+        bind:this={helpCard}
+        onkeydown={onHelpKey}
+      >
+        <p class="help-progress mono">{helpProgressLabel(helpStep)}</p>
+        <h2 class="help-title">{step.title}</h2>
+        <p class="help-line">{step.line}</p>
+        <p class="help-action">
+          <span class="help-dot" aria-hidden="true"></span>
+          {step.action}
+        </p>
+        <div class="help-actions">
+          <button
+            type="button"
+            disabled={helpStep === 0}
+            onclick={retreatHelp}
+          >
+            {HELP_MESSAGES.back}
+          </button>
+          <button class="help-next" type="button" onclick={advanceHelp}>
+            {helpNextLabel(helpStep)}
+          </button>
+          <button class="help-close" type="button" onclick={closeHelp}>
+            {HELP_MESSAGES.close}
+          </button>
+        </div>
+        <div class="help-keys">
+          <h3>{HELP_MESSAGES.shortcutsTitle}</h3>
+          {#each EDITOR_HELP_SHORTCUTS as group (group.title)}
+            <p class="help-keys-title mono">{group.title}</p>
+            <ul>
+              {#each group.shortcuts as shortcut (shortcut.keys)}
+                <li>
+                  <kbd>{shortcut.keys}</kbd>
+                  <span>{shortcut.what}</span>
+                </li>
+              {/each}
+            </ul>
+          {/each}
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <footer class="status" aria-live="polite">
     <span
@@ -3602,6 +3755,148 @@ function exportJson(): void {
     font-size: 13px;
     line-height: 1.55;
     margin: 0 0 14px;
+  }
+
+  /* A1: overlay de ayuda del editor (tour + atajos). */
+  .help-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-end;
+    padding: 0.75rem;
+    background: rgba(5, 5, 6, 0.78);
+  }
+
+  .help-card {
+    width: min(24rem, calc(100vw - 1.5rem));
+    max-height: calc(100dvh - 1.5rem);
+    overflow: auto;
+    padding: 1rem 1.1rem;
+    background: var(--panel);
+    border: 1px solid var(--acc);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  }
+
+  .help-card:focus-visible {
+    outline: 2px solid var(--acc);
+    outline-offset: 2px;
+  }
+
+  .help-progress {
+    margin: 0 0 0.35rem;
+    color: var(--ok);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .help-title {
+    margin: 0 0 0.35rem;
+    font: 700 1.1rem var(--disp);
+    letter-spacing: 0.3px;
+  }
+
+  .help-line {
+    margin: 0 0 0.55rem;
+    color: var(--mut);
+  }
+
+  .help-action {
+    display: flex;
+    gap: 0.5rem;
+    margin: 0 0 0.9rem;
+    color: var(--ink);
+  }
+
+  .help-dot {
+    flex: none;
+    width: 0.45rem;
+    height: 0.45rem;
+    margin-top: 0.4rem;
+    border-radius: 50%;
+    background: var(--acc);
+  }
+
+  .help-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .help-next {
+    background: var(--ok);
+    border-color: var(--ok);
+    color: #050506;
+    font-weight: 600;
+  }
+
+  .help-close {
+    margin-left: auto;
+  }
+
+  .help-keys {
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--line);
+  }
+
+  .help-keys h3 {
+    margin: 0 0 0.35rem;
+    font: 700 0.85rem var(--disp);
+    letter-spacing: 0.3px;
+  }
+
+  .help-keys-title {
+    margin: 0.5rem 0 0.25rem;
+    color: var(--dim);
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .help-keys ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 0.2rem;
+  }
+
+  .help-keys li {
+    display: grid;
+    grid-template-columns: 8.5rem minmax(0, 1fr);
+    gap: 0.5rem;
+    align-items: baseline;
+    font-size: 12px;
+  }
+
+  .help-keys kbd {
+    color: var(--ok);
+    font: 600 11px var(--mono);
+  }
+
+  .help-keys span {
+    color: var(--mut);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .help-card {
+      animation: help-in 0.14s ease-out;
+    }
+
+    @keyframes help-in {
+      from {
+        opacity: 0;
+        transform: translateY(4px);
+      }
+
+      to {
+        opacity: 1;
+        transform: none;
+      }
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {
