@@ -8,19 +8,7 @@ NetLab simula redes Ethernet/IP desde los bytes: implementa Ethernet, ARP, IPv4,
 ICMP, UDP, DNS, DHCP y TCP en TypeScript, corre el motor con reloj virtual y
 PRNG sembrado (misma semilla, misma secuencia de trazas) y expone el resultado
 en una CLI y en una UI web estática con inspector de paquetes, consola por host
-y panel de práctica. Ver `netlab-roadmap.md` para la visión completa.
-
-## Estado
-
-- **Fases 0 a 7 completas en `main`**: bytes y checksums, motor y capa 2,
-  IPv4/ICMP/ruteo, UI e inspector, UDP/DNS/DHCP, TCP, modo práctica, PCAP/PCAPNG
-  y binario único.
-- **Fase 8 (pulido y lanzamiento) en curso en la rama
-  `fase-8-pulido-lanzamiento`**: benchmarks, accesibilidad, tutorial de
-  bienvenida, documentación con teoría por protocolo, demo pública y material
-  de lanzamiento.
-- El detalle de la fase en curso y sus tareas vive en
-  `odd/tasks/fase-8-pulido-lanzamiento.md`.
+y panel de práctica.
 
 ## Requisitos
 
@@ -53,10 +41,10 @@ las capturas con `tshark`.
 | `validate`    | Evalúa una solución contra los checks de un ejercicio.                        |
 | `pcap`        | Exporta el tráfico de un escenario a `.pcap` o `.pcapng`.                     |
 | `pcap-import` | Lee un `.pcap`/`.pcapng` y describe un paquete por línea.                     |
-| `bench`       | Benchmarks sintéticos del motor (eventos/s, bytes, RSS). Ver `docs/bench.md`. |
+| `bench`       | Benchmarks sintéticos del motor (eventos/s, bytes, RSS).                      |
 | `serve`       | Sirve la UI estática en un puerto HTTP local.                                 |
 
-Ejemplos con archivos del repo:
+Ejemplos:
 
 ```sh
 bun run netlab -- run packages/cli/fixtures/dos-subredes.json --until 1s
@@ -107,9 +95,8 @@ TTFB de ese binario.
 | `packages/web`       | UI SvelteKit con adaptador estático: landing, workbench, inspector, editor y práctica.      |
 | `packages/server`    | Reservado para el backend; hoy solo el marcador del paquete.                                |
 
-Fuera de `packages/`: `docs/` (documentación), `odd/tasks/` (tareas por fase),
-`scripts/verify-binary.sh`, `packages/cli/fixtures/` (escenarios de ejemplo) y
-`packages/exercises/{exercises,solutions,routes}/` (catálogo y referencias).
+Fuera de `packages/`: `docs/` (documentación), `scripts/verify-binary.sh`, `packages/cli/fixtures/` (escenarios de ejemplo) 
+y `packages/exercises/{exercises,solutions,routes}/` (catálogo y referencias).
 
 ## Documentación
 
@@ -119,12 +106,6 @@ Fuera de `packages/`: `docs/` (documentación), `odd/tasks/` (tareas por fase),
   [`ipv4-icmp.md`](docs/teoria/ipv4-icmp.md),
   [`tcp.md`](docs/teoria/tcp.md),
   [`dns-dhcp.md`](docs/teoria/dns-dhcp.md).
-- [`docs/bench.md`](docs/bench.md) — cómo correr los benchmarks, workloads y
-  última tabla publicada.
-- `docs/adr/` — decisiones de diseño
-  ([ADR-001](docs/adr/001-monorepo.md) monorepo y dependencias,
-  [ADR-002](docs/adr/002-ui-stack.md) stack de UI).
-- `netlab-roadmap.md` — visión y roadmap por fases.
 
 ## Ejercicios
 
@@ -138,4 +119,4 @@ suyos por id.
 
 Grafo permitido: `bytes` ← `protocols` ← `core` ← `shell|exercises|pcap` ←
 `server|cli`; `web` solo consume tipos. `protocols` nunca importa `core`; `core`
-nunca importa `server`. Ver ADR-001.
+nunca importa `server`.
