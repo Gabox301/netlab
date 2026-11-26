@@ -1,9 +1,9 @@
 {
-  "extends": ["../../tsconfig.base.json", "./.svelte-kit/tsconfig.json"],
+  "extends": ["../../tsconfig.base.json", "$app/tsconfig"],
   "compilerOptions": {
     "noEmit": true,
-    "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "types": ["bun-types", "vite/client"]
+    "types": ["$app/types", "bun-types", "vite/client"]
   },
-  "include": ["src", "test"]
+  "include": ["src", "test", "*"],
+  "exclude": ["src/service-worker"]
 }
