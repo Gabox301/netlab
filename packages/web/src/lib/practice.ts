@@ -165,17 +165,17 @@ function parseProgress(value: unknown): PracticeProgress | null {
   if (!isRecord(value)) {
     return null;
   }
-  const attempts = value["attempts"];
-  const hintsRevealed = value["hintsRevealed"];
-  const elapsedMs = value["elapsedMs"];
+  const attempts = value.attempts;
+  const hintsRevealed = value.hintsRevealed;
+  const elapsedMs = value.elapsedMs;
   if (!isCount(attempts) || !isCount(hintsRevealed) || !isCount(elapsedMs)) {
     return null;
   }
-  const bestScore = value["bestScore"];
+  const bestScore = value.bestScore;
   if (bestScore !== null && !(isCount(bestScore) && bestScore <= 100)) {
     return null;
   }
-  const passedAt = value["passedAt"];
+  const passedAt = value.passedAt;
   if (
     passedAt !== null &&
     !(typeof passedAt === "string" && Number.isFinite(Date.parse(passedAt)))
@@ -198,10 +198,10 @@ export function parsePracticeProgress(
   } catch {
     return null;
   }
-  if (!isRecord(raw) || raw["version"] !== PRACTICE_PROGRESS_VERSION) {
+  if (!isRecord(raw) || raw.version !== PRACTICE_PROGRESS_VERSION) {
     return null;
   }
-  const source = raw["exercises"];
+  const source = raw.exercises;
   if (!isRecord(source)) {
     return null;
   }

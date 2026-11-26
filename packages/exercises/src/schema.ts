@@ -455,12 +455,12 @@ function parseNodeLike(value: unknown, path: string): ScenarioNodeLike {
   const type = reqString(obj, "type", path);
   const id = reqString(obj, "id", path);
   const node: ScenarioNodeLike = { type, id };
-  if (obj["interfaces"] !== undefined) {
+  if (obj.interfaces !== undefined) {
     node.interfaces = reqArray(obj, "interfaces", path).map((entry, index) =>
       parseInterfaceLike(entry, `${path}.interfaces[${index}]`),
     );
   }
-  if (obj["ports"] !== undefined) {
+  if (obj.ports !== undefined) {
     node.ports = reqArray(obj, "ports", path).map((entry, index) => {
       const port = reqRecord(entry, `${path}.ports[${index}]`);
       const name = optString(port, "name", `${path}.ports[${index}]`);
@@ -478,11 +478,8 @@ function parseNodeLike(value: unknown, path: string): ScenarioNodeLike {
  */
 function parseScenarioLike(value: unknown, path: string): ScenarioLike {
   const obj = reqRecord(value, path);
-  if (obj["version"] !== 1) {
-    throw fail(
-      path,
-      `"version" must be 1, got ${JSON.stringify(obj["version"])}`,
-    );
+  if (obj.version !== 1) {
+    throw fail(path, `"version" must be 1, got ${JSON.stringify(obj.version)}`);
   }
   const nodes = reqArray(obj, "nodes", path).map((entry, index) =>
     parseNodeLike(entry, `${path}.nodes[${index}]`),
@@ -496,21 +493,21 @@ function parseScenarioLike(value: unknown, path: string): ScenarioLike {
     ids.add(id);
   }
   const scenario: ScenarioLike = { version: 1, nodes };
-  if (obj["links"] !== undefined) {
+  if (obj.links !== undefined) {
     scenario.links = reqArray(obj, "links", path);
   }
-  if (obj["actions"] !== undefined) {
+  if (obj.actions !== undefined) {
     scenario.actions = reqArray(obj, "actions", path);
   }
-  if (obj["seed"] !== undefined) {
-    const seed = obj["seed"];
+  if (obj.seed !== undefined) {
+    const seed = obj.seed;
     if (typeof seed !== "number" || !Number.isInteger(seed)) {
       throw fail(path, `"seed" must be an integer`);
     }
     scenario.seed = seed;
   }
-  if (obj["until"] !== undefined) {
-    const until = obj["until"];
+  if (obj.until !== undefined) {
+    const until = obj.until;
     if (typeof until !== "number" && typeof until !== "string") {
       throw fail(path, `"until" must be a duration string or number`);
     }
@@ -584,7 +581,7 @@ function parseCheck(
     const host = reqString(obj, "host", path);
     const command = reqString(obj, "command", path);
     assertShellCommand(command, `${path}.command`);
-    const rawExpect = reqRecord(obj["expect"], `${path}.expect`);
+    const rawExpect = reqRecord(obj.expect, `${path}.expect`);
     const exitOk = optBoolean(rawExpect, "exitOk", `${path}.expect`);
     const stdoutMatches = optString(
       rawExpect,
@@ -684,10 +681,10 @@ function parseCheck(
       destination,
       ...name,
     };
-    if (obj["gateway"] !== undefined) {
+    if (obj.gateway !== undefined) {
       def.gateway = reqIpv4(obj, "gateway", path);
     }
-    if (obj["iface"] !== undefined) {
+    if (obj.iface !== undefined) {
       def.iface = reqString(obj, "iface", path);
     }
     return def;
@@ -710,10 +707,10 @@ function parseCheck(
 /** Validate an already-parsed JSON value into an `ExerciseJSON`. */
 export function parseExerciseJson(value: unknown): ExerciseJSON {
   const obj = reqRecord(value, "");
-  if (obj["version"] !== EXERCISE_VERSION) {
+  if (obj.version !== EXERCISE_VERSION) {
     throw fail(
       "",
-      `"version" must be ${EXERCISE_VERSION}, got ${JSON.stringify(obj["version"])}`,
+      `"version" must be ${EXERCISE_VERSION}, got ${JSON.stringify(obj.version)}`,
     );
   }
   const id = reqString(obj, "id", "");
@@ -744,12 +741,12 @@ export function parseExerciseJson(value: unknown): ExerciseJSON {
     kind: kind as ExerciseKind,
     objective,
     seed,
-    base: parseScenarioLike(obj["base"], "base"),
+    base: parseScenarioLike(obj.base, "base"),
     hints: hintList,
     checks: checkList,
   };
-  if (obj["until"] !== undefined) {
-    const until = obj["until"];
+  if (obj.until !== undefined) {
+    const until = obj.until;
     if (typeof until !== "number" && typeof until !== "string") {
       throw fail("", `"until" must be a duration string or number`);
     }

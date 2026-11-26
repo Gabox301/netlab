@@ -101,7 +101,7 @@ describe("netlab run", () => {
 
   test("populates the switch MAC table and delivers IPv4", async () => {
     const result = await runScenario(dosHosts());
-    const table = result.macTables["sw1"] ?? [];
+    const table = result.macTables.sw1 ?? [];
     const byMac = new Map(table.map((row) => [row.mac.toString(), row.port]));
     expect(byMac.get("02:00:00:00:00:0a")).toBe("p1");
     expect(byMac.get("02:00:00:00:00:0b")).toBe("p2");

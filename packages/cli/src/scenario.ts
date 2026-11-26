@@ -453,7 +453,7 @@ function parseVlanId(value: unknown, path: string, what: string): number {
 
 function parsePortVlan(value: unknown, path: string): ScenarioVlanPortConfig {
   const obj = reqRecord(value, path);
-  const modeRaw = obj["mode"];
+  const modeRaw = obj.mode;
   if (modeRaw !== undefined && modeRaw !== "access" && modeRaw !== "trunk") {
     throw fail(path, `"mode" must be "access" | "trunk"`);
   }
@@ -462,17 +462,17 @@ function parsePortVlan(value: unknown, path: string): ScenarioVlanPortConfig {
   if (mode !== undefined) {
     vlan.mode = mode;
   }
-  if (obj["vlan"] !== undefined) {
+  if (obj.vlan !== undefined) {
     if (mode === "trunk") {
       throw fail(path, `"vlan" is an access setting; use native on a trunk`);
     }
-    vlan.vlan = parseVlanId(obj["vlan"], path, `"vlan"`);
+    vlan.vlan = parseVlanId(obj.vlan, path, `"vlan"`);
   }
-  if (obj["allowed"] !== undefined) {
+  if (obj.allowed !== undefined) {
     if (mode !== "trunk") {
       throw fail(path, `"allowed" is a trunk setting`);
     }
-    const raw = obj["allowed"];
+    const raw = obj.allowed;
     if (!Array.isArray(raw) || raw.length === 0) {
       throw fail(path, `"allowed" must be a non-empty array of VLAN ids`);
     }
@@ -480,11 +480,11 @@ function parsePortVlan(value: unknown, path: string): ScenarioVlanPortConfig {
       parseVlanId(entry, `${path}.allowed[${i}]`, `"allowed" entry`),
     );
   }
-  if (obj["native"] !== undefined) {
+  if (obj.native !== undefined) {
     if (mode !== "trunk") {
       throw fail(path, `"native" is a trunk setting`);
     }
-    vlan.native = parseVlanId(obj["native"], path, `"native"`);
+    vlan.native = parseVlanId(obj.native, path, `"native"`);
   }
   if (
     vlan.native !== undefined &&
@@ -504,8 +504,8 @@ function parsePortDef(value: unknown, path: string): ScenarioPortDef {
   if (mac !== undefined) {
     def.mac = mac;
   }
-  if (obj["vlan"] !== undefined) {
-    def.vlan = parsePortVlan(obj["vlan"], `${path}.vlan`);
+  if (obj.vlan !== undefined) {
+    def.vlan = parsePortVlan(obj.vlan, `${path}.vlan`);
   }
   return def;
 }
@@ -522,8 +522,8 @@ function parseNode(value: unknown, path: string): ScenarioNode {
       throw fail(path, `host ${JSON.stringify(id)} needs one interface`);
     }
     let hostOpts: ScenarioHostOpts | undefined;
-    if (obj["hostOpts"] !== undefined) {
-      const opts = reqRecord(obj["hostOpts"], `${path}.hostOpts`);
+    if (obj.hostOpts !== undefined) {
+      const opts = reqRecord(obj.hostOpts, `${path}.hostOpts`);
       hostOpts = {};
       for (const key of [
         "arpTtlUs",
@@ -573,7 +573,7 @@ function parseNode(value: unknown, path: string): ScenarioNode {
       throw fail(path, `router ${JSON.stringify(id)} needs one port`);
     }
     const routes =
-      obj["routes"] === undefined
+      obj.routes === undefined
         ? undefined
         : reqArray(obj, "routes", path).map((entry, i) =>
             parseRouteDef(entry, `${path}.routes[${i}]`),
@@ -598,10 +598,10 @@ function parseEndpoint(value: unknown, path: string): ScenarioLinkEndpoint {
 function parseLink(value: unknown, path: string): ScenarioLink {
   const obj = reqRecord(value, path);
   const id = reqString(obj, "id", path);
-  const a = parseEndpoint(obj["a"], `${path}.a`);
-  const b = parseEndpoint(obj["b"], `${path}.b`);
-  const params = reqRecord(obj["params"], `${path}.params`);
-  const latencyUs = params["latencyUs"];
+  const a = parseEndpoint(obj.a, `${path}.a`);
+  const b = parseEndpoint(obj.b, `${path}.b`);
+  const params = reqRecord(obj.params, `${path}.params`);
+  const latencyUs = params.latencyUs;
   if (typeof latencyUs !== "number") {
     throw fail(path, `"params.latencyUs" must be a number`);
   }
@@ -626,8 +626,8 @@ function optBoolean(
 function parseAction(value: unknown, path: string): ScenarioAction {
   const obj = reqRecord(value, path);
   let at: DurationInput | undefined;
-  if (obj["at"] !== undefined) {
-    const raw = obj["at"];
+  if (obj.at !== undefined) {
+    const raw = obj.at;
     if (typeof raw !== "number" && typeof raw !== "string") {
       throw fail(path, `"at" must be a duration string or microseconds`);
     }
@@ -636,14 +636,14 @@ function parseAction(value: unknown, path: string): ScenarioAction {
   }
   // Fault actions (F-100) target a link or a host, so they are recognized
   // before the `host` requirement of the traffic actions.
-  if (obj["cut"] !== undefined) {
+  if (obj.cut !== undefined) {
     const action: ScenarioCutAction = { cut: reqString(obj, "cut", path) };
     if (at !== undefined) {
       action.at = at;
     }
     return action;
   }
-  if (obj["restore"] !== undefined) {
+  if (obj.restore !== undefined) {
     const action: ScenarioRestoreAction = {
       restore: reqString(obj, "restore", path),
     };
@@ -652,7 +652,7 @@ function parseAction(value: unknown, path: string): ScenarioAction {
     }
     return action;
   }
-  if (obj["restart"] !== undefined) {
+  if (obj.restart !== undefined) {
     const action: ScenarioRestartAction = {
       restart: reqString(obj, "restart", path),
     };
@@ -661,7 +661,7 @@ function parseAction(value: unknown, path: string): ScenarioAction {
     }
     return action;
   }
-  if (obj["flushArp"] !== undefined) {
+  if (obj.flushArp !== undefined) {
     const action: ScenarioFlushArpAction = {
       flushArp: reqString(obj, "flushArp", path),
     };
@@ -675,7 +675,7 @@ function parseAction(value: unknown, path: string): ScenarioAction {
     return action;
   }
   const host = reqString(obj, "host", path);
-  if (obj["exec"] !== undefined) {
+  if (obj.exec !== undefined) {
     const action: ScenarioShellAction = {
       host,
       exec: reqString(obj, "exec", path),
@@ -685,9 +685,9 @@ function parseAction(value: unknown, path: string): ScenarioAction {
     }
     return action;
   }
-  if (obj["ping"] !== undefined) {
+  if (obj.ping !== undefined) {
     const destIp = reqString(obj, "destIp", path);
-    const pingObj = reqRecord(obj["ping"], `${path}.ping`);
+    const pingObj = reqRecord(obj.ping, `${path}.ping`);
     const ping: ScenarioPingOptions = {};
     const count = optNumber(pingObj, "count", `${path}.ping`);
     if (count !== undefined) {
@@ -714,8 +714,8 @@ function parseAction(value: unknown, path: string): ScenarioAction {
     if (dontFragment !== undefined) {
       ping.dontFragment = dontFragment;
     }
-    if (pingObj["interval"] !== undefined) {
-      const raw = pingObj["interval"];
+    if (pingObj.interval !== undefined) {
+      const raw = pingObj.interval;
       if (typeof raw !== "number" && typeof raw !== "string") {
         throw fail(path, `"ping.interval" must be a duration string or number`);
       }
@@ -738,24 +738,24 @@ function parseAction(value: unknown, path: string): ScenarioAction {
   if (at !== undefined) {
     action.at = at;
   }
-  if (obj["etherType"] !== undefined) {
-    const etherType = obj["etherType"];
+  if (obj.etherType !== undefined) {
+    const etherType = obj.etherType;
     if (typeof etherType !== "number" && typeof etherType !== "string") {
       throw fail(path, `"etherType" must be a number or hex string`);
     }
     action.etherType = etherType;
   }
-  if (obj["payload"] !== undefined) {
-    if (typeof obj["payload"] !== "string") {
+  if (obj.payload !== undefined) {
+    if (typeof obj.payload !== "string") {
       throw fail(path, `"payload" must be a string`);
     }
-    action.payload = obj["payload"] as string;
+    action.payload = obj.payload as string;
   }
-  if (obj["payloadEncoding"] !== undefined) {
-    if (obj["payloadEncoding"] !== "utf8" && obj["payloadEncoding"] !== "hex") {
+  if (obj.payloadEncoding !== undefined) {
+    if (obj.payloadEncoding !== "utf8" && obj.payloadEncoding !== "hex") {
       throw fail(path, `"payloadEncoding" must be "utf8" | "hex"`);
     }
-    action.payloadEncoding = obj["payloadEncoding"];
+    action.payloadEncoding = obj.payloadEncoding;
   }
   // Early validation so JSON errors fail fast with a path.
   if (action.at !== undefined) {
@@ -769,10 +769,10 @@ function parseAction(value: unknown, path: string): ScenarioAction {
 /** Validate an already-parsed JSON value into a `Scenario`. */
 export function parseScenarioJson(value: unknown): Scenario {
   const obj = reqRecord(value, "scenario");
-  if (obj["version"] !== SCENARIO_VERSION) {
+  if (obj.version !== SCENARIO_VERSION) {
     throw fail(
       "scenario",
-      `"version" must be ${SCENARIO_VERSION}, got ${JSON.stringify(obj["version"])}`,
+      `"version" must be ${SCENARIO_VERSION}, got ${JSON.stringify(obj.version)}`,
     );
   }
   const nodes = reqRecord(obj, "scenario");
@@ -781,10 +781,10 @@ export function parseScenarioJson(value: unknown): Scenario {
     parseNode(entry, `nodes[${i}]`),
   );
   const linkList = (
-    obj["links"] === undefined ? [] : reqArray(obj, "links", "scenario")
+    obj.links === undefined ? [] : reqArray(obj, "links", "scenario")
   ).map((entry, i) => parseLink(entry, `links[${i}]`));
   const actionList = (
-    obj["actions"] === undefined ? [] : reqArray(obj, "actions", "scenario")
+    obj.actions === undefined ? [] : reqArray(obj, "actions", "scenario")
   ).map((entry, i) => parseAction(entry, `actions[${i}]`));
   const ids = new Set<string>();
   for (const node of nodeList) {
@@ -799,14 +799,14 @@ export function parseScenarioJson(value: unknown): Scenario {
     links: linkList,
     actions: actionList,
   };
-  if (obj["seed"] !== undefined) {
-    if (typeof obj["seed"] !== "number" || !Number.isInteger(obj["seed"])) {
+  if (obj.seed !== undefined) {
+    if (typeof obj.seed !== "number" || !Number.isInteger(obj.seed)) {
       throw fail("scenario", `"seed" must be an integer`);
     }
-    scenario.seed = obj["seed"] as number;
+    scenario.seed = obj.seed as number;
   }
-  if (obj["until"] !== undefined) {
-    const until = obj["until"];
+  if (obj.until !== undefined) {
+    const until = obj.until;
     if (typeof until !== "number" && typeof until !== "string") {
       throw fail("scenario", `"until" must be a duration string or number`);
     }

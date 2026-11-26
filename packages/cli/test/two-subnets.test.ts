@@ -98,7 +98,7 @@ describe("two subnets through a router", () => {
 
   test("echo crosses the router and traceroute shows every hop", async () => {
     const result = await runScenario(twoSubnets());
-    expect(result.routes["r1"]?.length).toBe(2);
+    expect(result.routes.r1?.length).toBe(2);
     expect(result.shellTranscripts).toHaveLength(1);
     const trace = result.shellTranscripts[0] as {
       lines: Array<string>;

@@ -34,15 +34,15 @@ las capturas con `tshark`.
 `bun packages/cli/src/main.ts <comando>`; el binario compilado se llama
 `netlab` y acepta lo mismo.
 
-| Comando       | Qué hace                                                                      |
-| ------------- | ----------------------------------------------------------------------------- |
-| `run`         | Corre un escenario v1 e imprime las trazas (human o JSON por línea).          |
-| `replay`      | Reproduce una grabación de `run` sin simular: scrubbing y breakpoints.        |
-| `validate`    | Evalúa una solución contra los checks de un ejercicio.                        |
-| `pcap`        | Exporta el tráfico de un escenario a `.pcap` o `.pcapng`.                     |
-| `pcap-import` | Lee un `.pcap`/`.pcapng` y describe un paquete por línea.                     |
-| `bench`       | Benchmarks sintéticos del motor (eventos/s, bytes, RSS).                      |
-| `serve`       | Sirve la UI estática en un puerto HTTP local.                                 |
+| Comando       | Qué hace                                                               |
+| ------------- | ---------------------------------------------------------------------- |
+| `run`         | Corre un escenario v1 e imprime las trazas (human o JSON por línea).   |
+| `replay`      | Reproduce una grabación de `run` sin simular: scrubbing y breakpoints. |
+| `validate`    | Evalúa una solución contra los checks de un ejercicio.                 |
+| `pcap`        | Exporta el tráfico de un escenario a `.pcap` o `.pcapng`.              |
+| `pcap-import` | Lee un `.pcap`/`.pcapng` y describe un paquete por línea.              |
+| `bench`       | Benchmarks sintéticos del motor (eventos/s, bytes, RSS).               |
+| `serve`       | Sirve la UI estática en un puerto HTTP local.                          |
 
 Ejemplos:
 
@@ -95,7 +95,7 @@ TTFB de ese binario.
 | `packages/web`       | UI SvelteKit con adaptador estático: landing, workbench, inspector, editor y práctica.      |
 | `packages/server`    | Reservado para el backend; hoy solo el marcador del paquete.                                |
 
-Fuera de `packages/`: `docs/` (documentación), `scripts/verify-binary.sh`, `packages/cli/fixtures/` (escenarios de ejemplo) 
+Fuera de `packages/`: `docs/` (documentación), `scripts/verify-binary.sh`, `packages/cli/fixtures/` (escenarios de ejemplo)
 y `packages/exercises/{exercises,solutions,routes}/` (catálogo y referencias).
 
 ## Documentación

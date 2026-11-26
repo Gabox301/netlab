@@ -202,10 +202,10 @@ function routeExerciseId(value: unknown, path: string): string {
  */
 export function parsePracticeRoute(value: unknown): PracticeRoute {
   const obj = routeRecord(value, "");
-  if (obj["version"] !== PRACTICE_ROUTE_VERSION) {
+  if (obj.version !== PRACTICE_ROUTE_VERSION) {
     throw failRoute(
       "",
-      `"version" must be ${PRACTICE_ROUTE_VERSION}, got ${JSON.stringify(obj["version"])}`,
+      `"version" must be ${PRACTICE_ROUTE_VERSION}, got ${JSON.stringify(obj.version)}`,
     );
   }
   const id = routeString(obj, "id", "");

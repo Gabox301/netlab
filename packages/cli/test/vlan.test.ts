@@ -170,7 +170,7 @@ describe("VLAN isolation through a trunk", () => {
 
   test("MAC tables carry the VLAN id", async () => {
     const result = await runScenario(twoVlans());
-    const rows = result.macTables["sw1"] ?? [];
+    const rows = result.macTables.sw1 ?? [];
     const vlans = new Set(rows.map((row) => row.vlan));
     expect(vlans.has(10)).toBe(true);
     const human = formatHuman(result);

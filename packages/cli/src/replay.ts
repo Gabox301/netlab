@@ -298,7 +298,7 @@ export function traceFromJson(value: unknown, path: string): Trace {
 function parseSummary(value: unknown, path: string): RecordingSummary {
   const obj = reqRecord(value, path);
 
-  const macTablesRaw = reqRecord(obj["macTables"], `${path}.macTables`);
+  const macTablesRaw = reqRecord(obj.macTables, `${path}.macTables`);
   const macTables: RecordingSummary["macTables"] = {};
   for (const [id, rowsRaw] of Object.entries(macTablesRaw)) {
     const rowsPath = `${path}.macTables.${id}`;
@@ -320,7 +320,7 @@ function parseSummary(value: unknown, path: string): RecordingSummary {
     });
   }
 
-  const routesRaw = reqRecord(obj["routes"], `${path}.routes`);
+  const routesRaw = reqRecord(obj.routes, `${path}.routes`);
   const routes: RecordingSummary["routes"] = {};
   for (const [id, rowsRaw] of Object.entries(routesRaw)) {
     const rowsPath = `${path}.routes.${id}`;
@@ -338,15 +338,15 @@ function parseSummary(value: unknown, path: string): RecordingSummary {
     });
   }
 
-  const shell = reqArray(obj["shell"], `${path}.shell`).map((entryRaw, i) => {
+  const shell = reqArray(obj.shell, `${path}.shell`).map((entryRaw, i) => {
     const entryPath = `${path}.shell[${i}]`;
     const entry = reqRecord(entryRaw, entryPath);
     const transcript: ShellTranscript = {
       host: reqString(entry, "host", entryPath),
       command: reqString(entry, "command", entryPath),
     };
-    if (entry["lines"] !== undefined) {
-      transcript.lines = reqArray(entry["lines"], `${entryPath}.lines`).map(
+    if (entry.lines !== undefined) {
+      transcript.lines = reqArray(entry.lines, `${entryPath}.lines`).map(
         (line, j) => {
           if (typeof line !== "string") {
             throw fail(`${entryPath}.lines[${j}]`, "must be a string");
@@ -372,10 +372,10 @@ export function parseRecordingJson(value: unknown): Recording {
   if (version !== RECORDING_VERSION) {
     throw fail(
       "",
-      `"version" must be ${RECORDING_VERSION}, got ${JSON.stringify(obj["version"])}`,
+      `"version" must be ${RECORDING_VERSION}, got ${JSON.stringify(obj.version)}`,
     );
   }
-  const traces = reqArray(obj["traces"], "traces").map((entry, i) =>
+  const traces = reqArray(obj.traces, "traces").map((entry, i) =>
     traceFromJson(entry, `traces[${i}]`),
   );
   const processed = reqNumber(obj, "processed", "");
@@ -384,13 +384,13 @@ export function parseRecordingJson(value: unknown): Recording {
   const seed = reqInteger(obj, "seed", "");
   return {
     version: RECORDING_VERSION,
-    scenario: reqRecord(obj["scenario"], "scenario") as unknown as Scenario,
+    scenario: reqRecord(obj.scenario, "scenario") as unknown as Scenario,
     seed,
     untilUs,
     finalTime,
     processed,
     traces,
-    summary: parseSummary(obj["summary"], "summary"),
+    summary: parseSummary(obj.summary, "summary"),
   };
 }
 
