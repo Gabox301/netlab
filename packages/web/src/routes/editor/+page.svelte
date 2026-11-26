@@ -1,4 +1,5 @@
 <script lang="ts">
+import { onMount } from "svelte";
 import { resolve } from "$app/paths";
 import {
   EDITOR_HELP_SHORTCUTS,
@@ -140,8 +141,7 @@ const ALIGN_WHERE: Record<AlignMode, string> = {
 const AUTOSAVE_KEY = "netlab.editor.autosave.v1";
 const SLOTS_KEY = "netlab.editor.slots.v1";
 
-const initial = loadInitialTopology();
-let topology = $state<Topology>(initial.topology);
+let topology = $state<Topology>(exampleTopology());
 let history = $state<TopologyHistory>(createHistory());
 /** True while a drag/key-hold/text session shares one undo step. */
 let coalescing = false;
@@ -168,9 +168,7 @@ let canvasPan = $state<{
 } | null>(null);
 let notice = $state<Notice>({
   kind: "info",
-  text: initial.restored
-    ? "Borrador restaurado desde este navegador."
-    : "Ejemplo cargado: h1 → r1 → h2/h3 con ping. Exportá el JSON y corré netlab run.",
+  text: "Ejemplo cargado: h1 → r1 → h2/h3 con ping. Exportá el JSON y corré netlab run.",
 });
 let filename = $state("mi-topologia");
 let pingDraft = $state({
@@ -209,8 +207,22 @@ let helpReturnFocus: HTMLElement | null = null;
 /** Names waiting to be duplicated again; never the topology nodes themselves. */
 let clipboard = $state<Array<string> | null>(null);
 /** Named saves: name → serialized `SavedTopology` text (F-130 slots). */
-let slots = $state<Record<string, string>>(loadSlots());
+let slots = $state<Record<string, string>>({});
 let slotName = $state("");
+
+/**
+ * SSR-safe: el primer render usa siempre el ejemplo (idéntico en servidor
+ * y cliente) y el borrador local se restaura acá, solo en el navegador.
+ */
+onMount(() => {
+  const stored = loadInitialTopology();
+  if (stored.restored) {
+    topology = stored.topology;
+    history = createHistory();
+    setNotice("info", "Borrador restaurado desde este navegador.");
+  }
+  slots = loadSlots();
+});
 
 /**
  * Autosave (F-130): `serializeTopology` walks the whole model, so this re-runs
