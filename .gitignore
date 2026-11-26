@@ -34,3 +34,5 @@ packages/cli/src/manifest.gen.ts
 .vscode/
 .idea/
 .pi
+.atl
+docs/
